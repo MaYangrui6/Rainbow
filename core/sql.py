@@ -1,3 +1,8 @@
+import os
+os.chdir("/home/ubuntu/project/mayang/LOGER")
+import sys
+# sys.path.append('/home/ubuntu/project/mayang/LOGER/psqlparse')
+# sys.path.append('/home/ubuntu/project/mayang/LOGER/lib')
 from psqlparse import parse_dict
 import torch
 import numpy as np
@@ -5,12 +10,12 @@ import time
 import re
 import dgl
 import pickle
-import sys
+# print('sys.path:',sys.path)
 from tqdm import tqdm
 from lib import iterator_utils, postgres, filepath
 
 from core import config
-
+from psycopg2 import extensions
 
 class _global:
     geqo_threshold = 2
@@ -27,6 +32,8 @@ class _global:
         self.__plan_latency_cache = {}
         self.name = None
         self.__auto_save_count = 0
+        # self.__schema = Schema(None, self)  # 初始化 __schema 属性
+
 
     @property
     def connection(self):
@@ -81,6 +88,7 @@ class _global:
             self.__cache_load()
 
     def setup(self, *args, **kwargs):
+        print(kwargs)
         assert 'dbname' in kwargs
         if 'cache' in kwargs:
             self.use_cache = bool(kwargs['cache'])
@@ -89,8 +97,10 @@ class _global:
             self.use_cache = True
 
         self.name = kwargs['dbname']
-        self.__db = postgres.connect(*args, **kwargs)
+        self.__db = postgres.connect()
+        print(self.__db)
         self.__cur = self.__db.cursor()
+        print(self.__cur)
         self.config = config.Config()
         self.__schema = Schema(self.__db, self)
 
@@ -442,7 +452,7 @@ class DataTable:
 
 
 class Schema:
-    def __init__(self, db: postgres.Connection, database: _global):
+    def __init__(self, db: extensions.connection, database: _global):
         schema_cache_file = f'sql/{database.name}.schema.pkl'
         if os.path.isfile(schema_cache_file):
             with open(schema_cache_file, 'rb') as f:
@@ -452,7 +462,7 @@ class Schema:
             assert db is not None, f'Failed to load schema cache file \'{schema_cache_file}\'.'
 
             tables = postgres.tables(db)
-
+            print('tables',tables)
             tables = list(filter(lambda x: x[0] == 'public', tables))
 
             self.tables = []
@@ -1896,6 +1906,7 @@ class Sql:
 
         subqueries = []
         for x in parse_result['fromClause']:
+            # print(x)
             if 'RangeVar' in x:
                 self.from_tables.append(FromTable(x['RangeVar']))
             else:
@@ -2155,7 +2166,8 @@ class Sql:
         self.hidden_edges = {}
 
         self.complicated_cmps = []
-
+        self.all_cmp=[]
+        
         for alias in self.aliases:
             self.join_edges[alias] = []
             if isinstance(self.alias_to_table[alias], Subquery):
@@ -2194,6 +2206,7 @@ class Sql:
         self.selectivities = [0 for i in range(database.schema.total_columns)]
 
         for cmp in self.comparisons:
+            self.all_cmp.append((str(cmp),len(cmp.aliasname_set)))
             concerned = cmp.concerned_aliases
             if len(cmp.aliasname_set) == 2 and len(cmp.aliasname_list) == 2:
                 # between two columns
@@ -2367,11 +2380,12 @@ class Sql:
         return parent
 
     def to_hetero_graph_dgl(self, clone=False):
+        '''undirected'''
         if not clone:
-            g, _data_dict, node_indexes = self.__hetero_graph_dgl
+            g, _data_dict, node_indexes ,_ = self.__hetero_graph_dgl
             g = g.to(self.device)
             data_dict = {k : (v[0].to(self.device), v[1].to(self.device)) for k, v in _data_dict.items()}
-            return g, data_dict, node_indexes
+            return g, data_dict, node_indexes, self.all_cmp
 
         node_indexes = {}
 
@@ -2429,7 +2443,8 @@ class Sql:
         g.nodes['table'].data['onehot'] = x_dict['table_onehot']
         g.nodes['table'].data['others'] = x_dict['table_others']
 
-        return g, data_dict, node_indexes
+        return g, data_dict, node_indexes, self.all_cmp
+
 
     def __column_cmp_edge_type(self, cmp: Comparison):
         op = cmp.op
@@ -2836,3 +2851,7 @@ class Baseline:
         if False and len(candidates) == 0:
             print(str(plan))
         return res
+
+
+# database = _global()
+# database.setup(dbname='indexselection_tpcds___1', user='postgres', password='password', host='127.0.0.1', port='5432')

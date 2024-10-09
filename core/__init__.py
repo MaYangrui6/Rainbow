@@ -2,6 +2,7 @@ from .config import Config
 from .sql import database, Sql, Baseline
 from .plan import Plan
 from .dataloader import *
+import psqlparse
 
 import torch as _torch
 

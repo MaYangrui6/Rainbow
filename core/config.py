@@ -21,7 +21,7 @@ class Config:
     resample_mode = 'augment'
     resample_amount = 0
 
-    use_hint = True
+    use_hint = False
 
     def __init__(self, **kwargs):
         for k, v in kwargs.items():

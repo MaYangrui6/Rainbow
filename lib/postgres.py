@@ -1,7 +1,9 @@
 from . import iterator_utils
 import pandas as pd
 from tqdm import tqdm
-from ._postgres import pg, Connection
+# from ._postgres import pg, Connection
+from psycopg2 import connect, OperationalError,extensions
+import psycopg2
 
 PG_TABLES = "select * from pg_tables;"
 PG_TABLES_NAME_ONLY = "select schemaname, tablename from pg_tables;"
@@ -37,8 +39,9 @@ PG_STATS_INFO = "select " \
                 "elem_count_histogram from pg_stats where " \
                 "schemaname = %s and tablename = %s and attname = %s;"
 
-def connect(*args, **kwargs) -> Connection:
-    return pg.connect(*args, **kwargs)
+def connect() -> extensions.connection:
+    return psycopg2.connect(dbname='imdbload', user='postgres', password='password', host='127.0.0.1', port='5432')
+
 
 def set_seed(connection, seed):
     cur = connection.cursor()

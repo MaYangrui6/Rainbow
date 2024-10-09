@@ -60,6 +60,7 @@ def batchloader(data, batch_size):
     return it
 
 def cursor_iter(database, select, filter_type=None):
+    print('database',database)
     cursor = database.cursor()
     cursor.execute(select)
     data = cursor_to_data(cursor, filter_type=filter_type)
