@@ -585,10 +585,7 @@ for epoch in range(5):
         # 前向传播
         pred_time = model(batch.x, batch.edge_attr, batch.edge_index, batch.configuration_vector, batch.batch)
 
-        target = torch.tensor(
-                label_list[batch_idx * data_loader.batch_size:(batch_idx + 1) * data_loader.batch_size],
-                dtype=torch.float).view(-1, 1)
-
+        target = batch.y.view(-1, 1)
         loss = criterion(pred_time, target)
 
         optimizer.zero_grad()
@@ -601,7 +598,7 @@ for epoch in range(5):
     print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
 
     # 随机抽取 20 个样本进行预测
-    sample_indices = random.sample(range(len(sql_graphs_pyg)), 20)
+    sample_indices = random.sample(range(len(sql_graphs_pyg)), 50)
     for idx in sample_indices:
         sample_batch = sql_graphs_pyg[idx]
         sample_x = sample_batch.x
