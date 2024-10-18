@@ -147,12 +147,12 @@ class DeepGPModel(DeepGP):
         output = self.last_layer(x, are_samples=are_samples)
         return output
 
-        # # 从 MultivariateNormal 提取均值
+        # 从 MultivariateNormal 提取均值
         # mean = output.mean
         # covariance_matrix = output.covariance_matrix
 
         # # 对均值应用 tanh 函数
-        # mean_transformed = torch.tanh(mean)
+        # mean_transformed = torch.sigmoid(mean)
 
         # # 创建新的 MultivariateNormal 对象，保留原始协方差
         # output_transformed = MultivariateNormal(mean_transformed, covariance_matrix)

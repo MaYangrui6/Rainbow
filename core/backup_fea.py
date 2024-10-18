@@ -32,6 +32,19 @@ sys.path.append(qpe_dir)
 # 现在尝试导入 TreeBuilder 类
 from QPE.sql2fea import TreeBuilder
 
+def parse_attribute_config(index_str):
+    '''处理输入的configuration，转化成cols/attribute的形式'''
+    # 将字符串转换为列表
+    index_list = ast.literal_eval(index_str)
+    
+    table_cols_list = []
+    for index in index_list:
+        # 去掉 I() 的部分，提取表名和列名
+        index_content = index[4:-1]  # 去掉前面的 'I(' 和后面的 ')'
+        table_cols = index_content.split(',')
+        table_cols_list.append(table_cols)
+    
+    return table_cols_list
 
 def swap_join_condition(condition: str) -> str:
     '''防止同一个连接条件，左右连接条件不一样而无法识别'''
@@ -173,7 +186,7 @@ def delete_left_table_cond(sql_condition):
     return f"{column} = {right_side.strip()}"
 
 
-def dgl_node_and_edge_vectorization(sql_query, config_index, plan):
+def dgl_node_and_edge_vectorization(sql_query, config_index, plan,attribute_dict):
     sql_instance = Sql(sql_query)
 
     # 构建异构图
@@ -256,6 +269,18 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan):
         new_v = torch.tensor([node_indexes['~' + t]])  # 自环的终点
         g.add_edges(new_u, new_v)
     g.edata['feature'] = vector_edge
+    
+    #构建configuration特征
+    configuration_vector=[0]*len(attribute_dict)
+    for attrs in parse_attribute_config(config_index):
+        for p in range(len(attrs)):
+            #获得在indexed_attribute中的位置
+            attr=attrs[p]
+            if attr[:2]=='C ':
+                attr=attr[2:]
+            attr_p=attribute_dict[attr]
+            configuration_vector[attr_p]+=1/(p+1)
+    g.global_data = {"configuration_vector": torch.tensor(configuration_vector)}
     return g
 
 
@@ -264,9 +289,10 @@ def dgl_to_pyg(dgl_graph,label):
     x = dgl_graph.ndata['feature']  # 节点特征
     edge_index = torch.stack(dgl_graph.edges()).long()  # 边索引 (转换为 PyG 格式)
     edge_attr = dgl_graph.edata['feature']  # 边特征
+    configuration_vector = dgl_graph.global_data['configuration_vector'] # configuration_vector
     batch = torch.zeros(dgl_graph.number_of_nodes(), dtype=torch.long)  # 所有节点归为同一批次
     label_tensor = torch.tensor(label, dtype=torch.float32)  # 根据需要使用 float32 或其他类型
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr,y=label_tensor, batch=batch)
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, configuration_vector=configuration_vector,y=label_tensor, batch=batch)
 
 
 # class GraphEncoder(nn.Module):
@@ -406,9 +432,9 @@ class GraphEncoder(nn.Module):
 
 
 class ImprovementPredictionModel(nn.Module):
-    """预测模型，基于图编码."""
+    """预测模型，基于图编码，并拼接额外的特征."""
 
-    def __init__(self, in_feats, edge_feats, graph_embedding_size, use_dgp=True):
+    def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, use_dgp=True):
         print('start ImprovementPredictionModel')
         super(ImprovementPredictionModel, self).__init__()
         self.use_dgp = use_dgp
@@ -416,29 +442,44 @@ class ImprovementPredictionModel(nn.Module):
 
         # 定义高斯过程模型和对应的似然函数
         self.likelihood = GaussianLikelihood()
-        if self.use_dgp:
-            self.gp_model = DeepGPModel(
-                graph_embedding_size * 2)  # 2 * graph_embedding_size 是因为我们在全局池化时合并了 mean 和 max 结果
-        else:
-            self.gp_model = DKLGPModel(graph_embedding_size * 2)
 
-    def forward(self, x, edge_attr, edge_index, batch_index):
+        # 将图嵌入和配置特征拼接后的大小传递给 GP 模型
+        self.input_size = graph_embedding_size * 2 + config_vector_size  # 拼接后的大小
+
+        if self.use_dgp:
+            self.gp_model = DeepGPModel(self.input_size)
+        else:
+            self.gp_model = DKLGPModel(self.input_size)
+
+    def forward(self, x, edge_attr, edge_index,configuration_vector, batch_index):
+        # 获取图嵌入
         graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
+        #TODO 修改batch需要修改32
+        configuration_vector = configuration_vector.view(32, -1)
+
+
+        # 拼接额外的特征
+        graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
 
         # 确保在训练时调用 train()，在预测时调用 eval()
         self.gp_model.train()
         self.likelihood.train()
 
         with gpytorch.settings.fast_pred_var():
-            # 使用 graph_embedding 进行预测
+            # 使用拼接后的 embedding 进行预测
             output = self.gp_model(graph_embedding)
             prediction = self.likelihood(output)
 
         return prediction  # 返回高斯过程的均值作为预测值
 
-    def predict(self, x, edge_attr, edge_index, batch_index):
+    def predict(self, x, edge_attr, edge_index, configuration_vector, batch_index):
         """在预测时调用"""
         graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
+        configuration_vector = configuration_vector.view(1, -1)
+
+        # 拼接额外的特征
+        graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
+
         self.gp_model.eval()
         self.likelihood.eval()
 
@@ -447,6 +488,7 @@ class ImprovementPredictionModel(nn.Module):
             prediction = self.likelihood(output)
 
         return prediction
+
 
 
 def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=0, end_idx=8877):
@@ -469,9 +511,22 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
     print('start load_sql_graphs_pyg')
     # 读取 CSV 数据
     df = pd.read_csv(csv_path).iloc[start_idx:, :]
+    # df = pd.read_csv(csv_path).iloc[start_idx:, :].sample(n=3200, random_state=42)
     # 设置数据库连接
     database.setup(dbname=dbname, user=user, password=password, host=host, port=port, cache=False)
     sql_graphs_pyg = []
+    #创建index的vector
+    attribute_num=0
+    attribute_dict={}
+    for x in df['index'].values:
+        for attrs in parse_attribute_config(x):
+            for attr in attrs:
+                if attr[:2]=='C ':
+                    attr=attr[2:]
+                if attr not in attribute_dict:
+                    attribute_dict[attr]=attribute_num
+                    attribute_num+=1
+
 
     query_list = df['query'].values
     quey_config_list = df['index'].values
@@ -480,19 +535,18 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
         # if cnt % 50 == 0:
         #     print(cnt)
         print(i)
-        g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i])
+        g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i], attribute_dict)
         # 转换为 PyG 数据
         pyg_data = dgl_to_pyg(g,df['label'].values[i])
         sql_graphs_pyg.append(pyg_data)
 
-    return sql_graphs_pyg, df['label'].values
+    return sql_graphs_pyg, df['label'].values, len(attribute_dict)
 
 
-if __name__ == "__main__":
-    num_edge_features = 15
+num_edge_features = 15
 
     # 读取数据并设置数据库
-    sql_graphs_pyg, label_list = load_sql_graphs_pyg(
+sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
         csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
         dbname='imdbload',
         user='postgres',
@@ -501,66 +555,85 @@ if __name__ == "__main__":
         port='5432',
         start_idx=7
     )
-    print('len(label_list) 需要是batch_size的倍数', len(label_list))
+print('len(label_list) 需要是batch_size的倍数', len(label_list))
+# 设置随机种子
+seed = 42
+torch.manual_seed(seed)  # PyTorch 随机种子
+np.random.seed(seed)  # NumPy 随机种子
+random.seed(seed)  # Python 随机种子
     # 创建 PyG DataLoader
-    data_loader = DataLoader(sql_graphs_pyg, batch_size=32, shuffle=True)
+data_loader = DataLoader(sql_graphs_pyg, batch_size=32, shuffle=True)
+model = ImprovementPredictionModel(sql_graphs_pyg[0].x.shape[1], sql_graphs_pyg[0].edge_attr.shape[1],
+                                       graph_embedding_size=32,config_vector_size=config_vector_size)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+criterion = torch.nn.MSELoss()
 
-    model = ImprovementPredictionModel(sql_graphs_pyg[0].x.shape[1], sql_graphs_pyg[0].edge_attr.shape[1],
-                                       graph_embedding_size=64)
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    criterion = torch.nn.MSELoss()
+print('start DeepApproximateMLL')
+mll = DeepApproximateMLL(VariationalELBO(model.gp_model.likelihood, model.gp_model, 32))
+total_loss_list=[float('inf')]
+for epoch in range(30):
+    model.train()
+    total_loss = 0
+    for batch_idx, batch in enumerate(data_loader):
+        # 前向传播
+        with gpytorch.settings.num_likelihood_samples(data_loader.batch_size):
+            pred_time = model(batch.x, batch.edge_attr, batch.edge_index, batch.configuration_vector, batch.batch)
 
-    print('start DeepApproximateMLL')
-    mll = DeepApproximateMLL(VariationalELBO(model.gp_model.likelihood, model.gp_model, 32))
-    total_loss_list=[float('inf')]
-    less_1_list=[]
-    for epoch in range(20):
-        model.train()
-        total_loss = 0
-        for batch_idx, batch in enumerate(data_loader):
-            # 前向传播
-            with gpytorch.settings.num_likelihood_samples(data_loader.batch_size):
-                pred_time = model(batch.x, batch.edge_attr, batch.edge_index, batch.batch)
+            target = batch.y.view(-1, 1)
+            loss = -mll(pred_time, target)
 
-                target = batch.y.view(-1, 1)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
 
-                loss = -mll(pred_time, target)
+        total_loss += loss.item()
+        print("Epoch %d batch_idx%d loss:" % (epoch + 1, batch_idx), loss.item())
 
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+    print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
 
-            total_loss += loss.item()
-            print("Epoch %d batch_idx%d loss:" % (epoch + 1, batch_idx), loss.item())
+    # 随机抽取 20 个样本进行预测
+    sample_indices = random.sample(range(len(sql_graphs_pyg)), 50)
+    min_diff=[]
+    for idx in sample_indices:
+        sample_batch = sql_graphs_pyg[idx]
+        sample_x = sample_batch.x
+        sample_edge_attr = sample_batch.edge_attr
+        sample_edge_index = sample_batch.edge_index
+        sample_configuration_vector= sample_batch.configuration_vector
 
-        print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
-
-        # 随机抽取 20 个样本进行预测
-        sample_indices = random.sample(range(len(sql_graphs_pyg)), 50)
-        min_diff=[]
-        for idx in sample_indices:
-            sample_batch = sql_graphs_pyg[idx]
-            sample_x = sample_batch.x
-            sample_edge_attr = sample_batch.edge_attr
-            sample_edge_index = sample_batch.edge_index
-
-            # 获取对应的 target 值
-            target_value = label_list[idx]
-            model.eval()
-            with torch.no_grad():
-                with gpytorch.settings.num_likelihood_samples(32):
-                    pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_batch.batch)
-            diff=np.mean(pred_mean.mean.numpy())-target_value
-            print(
-                f'Sample Index: {idx}, Predicted Mean: {np.mean(pred_mean.mean.numpy())}, Target Value: {target_value} difference: {diff}')
-            if abs(diff)<0.1:
-                min_diff.append(diff)
-        print('the number of samples < 0.1:',len(min_diff))
-        less_1_list.append(len(min_diff))
-        print('numbers in less_1_list',less_1_list)
-        # 一个Epoch提升的loss小于5就退出
-        if total_loss>total_loss_list[-1]-5:
+        # 获取对应的 target 值
+        target_value = label_list[idx]
+        model.eval()
+        with torch.no_grad():
+            with gpytorch.settings.num_likelihood_samples(32):
+                pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector, sample_batch.batch)
+        diff=np.mean(pred_mean.mean.numpy())-target_value
+        print(
+            f'Sample Index: {idx}, Predicted Mean: {np.mean(pred_mean.mean.numpy())}, Target Value: {target_value} difference: {diff}')
+        if abs(diff)<0.1:
+            min_diff.append(diff)
+    print('the number of samples < 0.1:',len(min_diff))
+    #一个Epoch提升的loss小于1就退出
+    if total_loss>total_loss_list[-1]+1:
             break
-        total_loss_list.append(total_loss)
-    print('total_loss_list',total_loss_list)
-    print('numbers in less_1_list',less_1_list)
+    total_loss_list.append(total_loss)
+    
+diff_list=[]
+for idx in range(8928):
+    sample_batch = sql_graphs_pyg[idx]
+    sample_x = sample_batch.x
+    sample_edge_attr = sample_batch.edge_attr
+    sample_edge_index = sample_batch.edge_index
+    sample_configuration_vector= sample_batch.configuration_vector
+
+    # 获取对应的 target 值
+    target_value = label_list[idx]
+    model.eval()
+    with torch.no_grad():
+        with gpytorch.settings.num_likelihood_samples(32):
+            pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector, sample_batch.batch)
+    print(
+            f'Sample Index: {idx}, Predicted Mean: {np.mean(pred_mean.mean.numpy())}, Target Value: {target_value}, difference: {np.mean(pred_mean.mean.numpy())-target_value}')
+    diff_list.append(np.mean(pred_mean.mean.numpy())-target_value)
+less_1=[x for x in diff_list if abs(x)<0.1]
+print('len(less_1),len(less_1)/len(diff_list)',len(less_1),len(less_1)/len(diff_list))
