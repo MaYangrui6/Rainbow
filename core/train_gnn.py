@@ -1,3 +1,5 @@
+import pickle
+
 import pandas as pd
 import numpy as np
 import torch
@@ -6,28 +8,25 @@ from torch_geometric.data import Data
 from torch_geometric.nn import TransformerConv, TopKPooling
 from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 from torch_geometric.loader import DataLoader
-import gpytorch
-from gpytorch.mlls import DeepApproximateMLL, VariationalELBO
-from gpytorch.likelihoods import GaussianLikelihood
+from blitz.utils import variational_estimator
+from blitz.modules import BayesianLinear
+from torch.optim.lr_scheduler import StepLR
 import os
 import sys
 import random
-
 loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
-# 将 QPE 目录添加到 sys.path
-sys.path.append(loger_dir)
+
 from core.models.DGP import DeepGPModel
 from core.models.DKL import DKLGPModel
 from sql import Sql, _global
 from core import database, Sql, Plan, load
 import ast
 import re
-import torch.nn as nn
 import torch.nn.functional as F
 
 # 获取 QPE 目录的绝对路径
-qpe_dir = os.path.abspath('/home/ubuntu/project/mayang')
+qpe_dir = os.path.abspath('/home/ubuntu/project/rainbow')
 
 # 将 QPE 目录添加到 sys.path
 sys.path.append(qpe_dir)
@@ -79,6 +78,7 @@ def split_cmp_expression(cmp, num):
             results.append((part, current_num))
 
     return results
+
 
 def parse_attribute_config(index_str):
     '''处理输入的configuration，转化成cols/attribute的形式'''
@@ -266,6 +266,7 @@ def delete_left_table_cond(sql_condition):
 
 
 def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dict):
+    num_edge_features = 15
     sql_instance = Sql(sql_query)
 
     # 构建异构图
@@ -389,66 +390,6 @@ def dgl_to_pyg(dgl_graph, label):
                 y=label_tensor, batch=batch)
 
 
-# class GraphEncoder(nn.Module):
-#     """图编码模块，基于 TransformerConv."""
-
-#     def __init__(self, in_feats, edge_feats, embedding_size, num_layers=3, top_k_every_n=3, top_k_ratio=0.5, n_heads=4,
-#                  dropout_rate=0.5):
-#         super(GraphEncoder, self).__init__()
-#         self.embedding_size = embedding_size
-#         self.top_k_every_n = top_k_every_n
-#         self.edge_dim = edge_feats
-#         self.n_heads = n_heads
-
-#         # 第一层 TransformerConv
-#         self.conv1 = TransformerConv(in_feats, self.embedding_size, heads=n_heads, dropout=dropout_rate,
-#                                      edge_dim=edge_feats, beta=True)
-#         self.transf1 = nn.Linear(self.embedding_size * n_heads, self.embedding_size)
-#         self.bn1 = nn.BatchNorm1d(self.embedding_size)
-
-#         # 其他 TransformerConv 层及 TopKPooling
-#         # TopKPooling 需要对图进行下采样，类似于卷积神经网络（CNN）中的池化操作，用来减小图的大小，保留最重要的信息。
-#         self.conv_layers = nn.ModuleList()
-#         self.transf_layers = nn.ModuleList()
-#         self.bn_layers = nn.ModuleList()
-#         self.pooling_layers = nn.ModuleList()
-
-#         for _ in range(num_layers):
-#             self.conv_layers.append(
-#                 TransformerConv(self.embedding_size, self.embedding_size, heads=n_heads, dropout=dropout_rate,
-#                                 edge_dim=edge_feats, beta=True))
-#             self.transf_layers.append(nn.Linear(self.embedding_size * n_heads, self.embedding_size))
-#             self.bn_layers.append(nn.BatchNorm1d(self.embedding_size))
-#             self.pooling_layers.append(TopKPooling(self.embedding_size, ratio=top_k_ratio))
-
-#     def forward(self, x, edge_attr, edge_index, batch_index):
-#         # print('x',x.shape)
-#         x = self.conv1(x, edge_index, edge_attr)
-
-#         # 调整线性层输入的形状
-#         x = torch.relu(self.transf1(x.view(-1, self.embedding_size * self.n_heads)))
-#         x = self.bn1(x)
-
-#         global_representation = []
-
-#         for i, conv_layer in enumerate(self.conv_layers):
-#             x = conv_layer(x, edge_index, edge_attr)
-#             x = torch.relu(self.transf_layers[i](x.view(-1, self.embedding_size * self.n_heads)))  # 确保形状匹配
-#             x = self.bn_layers[i](x)
-
-#             if i % self.top_k_every_n == 0 or i == len(self.conv_layers) - 1:
-#                 # print('edge_index', edge_index.shape)
-#                 x, edge_index, edge_attr, batch_index, _, _ = self.pooling_layers[i](
-#                     x, edge_index, edge_attr, batch_index
-#                 )
-#                 global_representation.append(torch.cat([
-#                     gmp(x, batch_index),
-#                     gap(x, batch_index)
-#                 ], dim=1))
-
-#         x = sum(global_representation)
-
-#         return x
 
 class GraphEncoder(nn.Module):
     """图编码模块，基于 TransformerConv,添加了残差连接。"""
@@ -524,50 +465,58 @@ class GraphEncoder(nn.Module):
         return x
 
 
+@variational_estimator
 class ImprovementPredictionModelGNN(nn.Module):
-    """使用图卷积神经网络进行预测，基于图编码，并增加多层线性层，融合配置向量."""
-
+    """使用图卷积神经网络进行预测，基于图编码，并增加多层贝叶斯线性层，融合配置向量."""
     def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=3):
         print('start ImprovementPredictionModelGNN')
         super(ImprovementPredictionModelGNN, self).__init__()
 
+        self.dropout = nn.Dropout(p=0.3)
+
         # 图编码器
         self.graph_encoder = GraphEncoder(in_feats, edge_feats, graph_embedding_size)
 
-        # 定义多个全连接层
-        self.layers = nn.ModuleList()
-        self.batch_norms = nn.ModuleList()  # 批归一化层列表
-
-        # 第一层，从 (图嵌入维度 + 配置向量维度) 到隐藏层维度
-        input_dim = graph_embedding_size * 2 + config_vector_size  # 2 * graph_embedding_size 因为全局池化时合并了 mean 和 max
-        self.layers.append(nn.Linear(input_dim, hidden_dim))
-        self.batch_norms.append(nn.BatchNorm1d(hidden_dim))  # 添加批归一化层
+        # 定义贝叶斯线性层
+        input_dim = graph_embedding_size * 2 + config_vector_size
+        self.blinear1 = BayesianLinear(input_dim, hidden_dim, prior_sigma_1=1)
+        self.batch_norm1 = nn.BatchNorm1d(hidden_dim)
 
         # 中间的隐藏层
-        for _ in range(num_layers - 2):
-            self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+        self.layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(BayesianLinear(hidden_dim, hidden_dim, prior_sigma_1=1))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
 
         # 最后一层，隐藏层到输出维度
-        self.layers.append(nn.Linear(hidden_dim, 1))  # 输出为单个值
+
+        self.blinear_out = BayesianLinear(hidden_dim, 1, prior_sigma_1=1)  # 输出为单个值
 
     def forward(self, x, edge_attr, edge_index, configuration_vector, batch_index):
         # 通过图编码器获取图的嵌入表示
         graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
 
         # 拼接 graph_embedding 和 configuration_vector
-        configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)  # 调整 configuration_vector 的形状
+        configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)
         graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
 
-        # 将拼接后的向量输入到多层全连接网络
-        for i, layer in enumerate(self.layers[:-1]):
-            graph_embedding = layer(graph_embedding)  # 全连接层
-            graph_embedding = self.batch_norms[i](graph_embedding)  # 批归一化层
-            graph_embedding = F.relu(graph_embedding)  # ReLU 激活函数
+        # 第一个贝叶斯线性层
+        x_ = self.blinear1(graph_embedding)
+        x_ = self.batch_norm1(x_)
+        x_ = self.dropout(x_)
+        x_ = F.leaky_relu(x_)
+
+        # 中间贝叶斯线性层
+        for layer, batch_norm in zip(self.layers, self.batch_norms):
+            x_ = layer(x_)
+            x_ = batch_norm(x_)
+            x_ = F.leaky_relu(x_)
+            x_ = self.dropout(x_)
 
         # 最后一层输出预测值
-        output = self.layers[-1](graph_embedding)
-        prediction = F.sigmoid(output)  # 使用 ReLU 激活函数保证输出非负数
+        output = self.blinear_out(x_)
+        prediction = F.sigmoid(output)  # 保证输出非负数
 
         return prediction
 
@@ -575,22 +524,23 @@ class ImprovementPredictionModelGNN(nn.Module):
         """在预测时调用"""
         self.eval()  # 设置为评估模式
         with torch.no_grad():
-            graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
-
-            # 拼接 graph_embedding 和 configuration_vector
-            configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)
-            graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
-
-            # 通过多层全连接网络计算预测值
-            for i, layer in enumerate(self.layers[:-1]):
-                graph_embedding = layer(graph_embedding)
-                graph_embedding = self.batch_norms[i](graph_embedding)
-                graph_embedding = F.relu(graph_embedding)
-
-            output = self.layers[-1](graph_embedding)
-            prediction = F.sigmoid(output)  # 保证预测值为非负数
-
+            prediction = self.forward(x, edge_attr, edge_index, configuration_vector, batch_index)
         return prediction
+
+def evaluate_regression(regressor,
+                        X,
+                        y,
+                        samples=50,
+                        std_multiplier=2):
+    preds = [regressor(*X) for i in range(samples)]
+    preds = torch.stack(preds)
+    means = preds.mean(axis=0)
+    stds = preds.std(axis=0)
+    ci_upper = means + (std_multiplier * stds)
+    ci_lower = means - (std_multiplier * stds)
+    ic_acc = (ci_lower <= y) * (ci_upper >= y)
+    ic_acc = ic_acc.float().mean()
+    return ic_acc, (ci_upper >= y).float().mean(), (ci_lower <= y).float().mean()
 
 
 def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=0, end_idx=8877):
@@ -638,65 +588,126 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
         print(i)
         g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i], attribute_dict)
         # 转换为 PyG 数据
-        pyg_data = dgl_to_pyg(g, df['improvement'].values[i])
+        pyg_data = dgl_to_pyg(g, df['label'].values[i])
         sql_graphs_pyg.append(pyg_data)
 
-    return sql_graphs_pyg, df['improvement'].values, len(attribute_dict)
+    return sql_graphs_pyg, df['label'].values, len(attribute_dict)
 
-num_edge_features = 15
+def main():
+    data_loader_file = '/tmp/data_loader.pkl'
+    data_loader = None
 
-    # 读取数据并设置数据库
-sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
-    csv_path='/home/ubuntu/project/mayang/Classification/process_data/tpcds/dataset_tpcds_383_plan.csv',
-    dbname='indexselection_tpcds___1',
-    user='postgres',
-    password='password',
-    host='127.0.0.1',
-    port='5432',
-    start_idx=3286
+    # 检查是否已有保存的DataLoader
+    if not os.path.exists(data_loader_file):
+        # 读取数据并设置数据库
+        sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
+            csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
+            dbname='imdbload',
+            user='postgres',
+            password='password',
+            host='127.0.0.1',
+            port='5432',
+            start_idx=7
+        )
+
+        print('len(label_list) 需要是batch_size的倍数:', len(label_list))
+
+        # 创建 PyG DataLoader
+        data_loader = DataLoader(sql_graphs_pyg, batch_size=64, shuffle=True)
+
+        # 保存DataLoader到磁盘
+        with open(data_loader_file, 'wb') as f:
+            pickle.dump(data_loader, f)
+
+        print('Data loaded and saved to disk.')
+    else:
+        # 从磁盘加载DataLoader
+        with open(data_loader_file, 'rb') as f:
+            data_loader = pickle.load(f)
+
+        print('DataLoader loaded from disk.')
+
+    # 初始化模型
+    model = ImprovementPredictionModelGNN(
+        data_loader.dataset[0].x.shape[1],
+        data_loader.dataset[0].edge_attr.shape[1],
+        graph_embedding_size=32,
+        config_vector_size=data_loader.dataset[0].configuration_vector.shape[0]
     )
-print('len(label_list) 需要是batch_size的倍数', len(label_list))
-# 创建 PyG DataLoader
-data_loader = DataLoader(sql_graphs_pyg, batch_size=32, shuffle=True)
 
-model = ImprovementPredictionModelGNN(sql_graphs_pyg[0].x.shape[1], sql_graphs_pyg[0].edge_attr.shape[1],
-                                       graph_embedding_size=32,config_vector_size=config_vector_size)
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-criterion = torch.nn.MSELoss()  # 均方误差损失函数
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    criterion = torch.nn.MSELoss()  # 均方误差损失函数
+    # 初始化学习率调度器
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)  # 每10个epoch将学习率减半
 
-import numpy as np
-print('start DeepApproximateMLL')
-# mll = DeepApproximateMLL(VariationalELBO(model.gp_model.likelihood, model.gp_model, 32))
-for epoch in range(5):
-    total_loss = 0
-    for batch_idx, batch in enumerate(data_loader):
-        # 前向传播
-        pred_time = model(batch.x, batch.edge_attr, batch.edge_index, batch.configuration_vector, batch.batch)
+    model.train()
 
-        target = batch.y.view(-1, 1)
-        loss = criterion(pred_time, target)
+    print('start DeepApproximateMLL')
+    iteration = 0
+    for epoch in range(50):
+        total_loss = 0
+        for batch_idx, batch in enumerate(data_loader):
+            optimizer.zero_grad()
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+            target = batch.y.view(-1, 1)
 
-        total_loss += loss.item()
-        print("Epoch %d batch_idx%d loss:" % (epoch + 1, batch_idx), loss.item())
+            inputs = (batch.x, batch.edge_attr, batch.edge_index, batch.configuration_vector, batch.batch)
 
-    print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
+            loss = model.sample_elbo(
+                inputs=inputs,
+                labels=target,
+                criterion=criterion,
+                sample_nbr=10,
+                complexity_cost_weight=0.01 / len(data_loader)
+            )
 
-    # 随机抽取 20 个样本进行预测
-    sample_indices = random.sample(range(len(sql_graphs_pyg)), 50)
-    for idx in sample_indices:
-        sample_batch = sql_graphs_pyg[idx]
-        sample_x = sample_batch.x
-        sample_edge_attr = sample_batch.edge_attr
-        sample_edge_index = sample_batch.edge_index
-        sample_configuration_vector= sample_batch.configuration_vector
+            iteration += 1
+            if iteration % 100 == 0:
+                ic_acc, under_ci_upper, over_ci_lower = evaluate_regression(model,
+                                                                            inputs,
+                                                                            target,
+                                                                            samples=25,
+                                                                            std_multiplier=3)
+
+                print("CI acc: {:.2f}, CI upper acc: {:.2f}, CI lower acc: {:.2f}".format(ic_acc, under_ci_upper,
+                                                                                          over_ci_lower))
+                print("Loss: {:.4f}".format(loss))
+
+            loss.backward()
+            optimizer.step()
+
+            total_loss += loss.item()
+            print("Epoch %d batch_idx%d loss:" % (epoch + 1, batch_idx), loss.item())
+
+        print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
+
+        if (epoch + 1) % 20 == 0:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.5  # 将学习率减半
+
+        # 随机抽取 20 个样本进行预测
+        sample_indices = random.sample(range(len(data_loader.dataset)), 50)
+        min_diff = []
+        for idx in sample_indices:
+            sample_batch = data_loader.dataset[idx]
+            sample_x = sample_batch.x
+            sample_edge_attr = sample_batch.edge_attr
+            sample_edge_index = sample_batch.edge_index
+            sample_configuration_vector = sample_batch.configuration_vector
 
             # 获取对应的 target 值
-        target_value = label_list[idx]
-        model.eval()
-        with torch.no_grad():
-            pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector, sample_batch.batch)
-        print(f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}')
+            target_value = sample_batch.y
+            model.eval()
+            with torch.no_grad():
+                pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector,
+                                          sample_batch.batch)
+            print(
+                f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}, difference: {pred_mean - target_value}')
+            if abs(pred_mean - target_value) < 0.1:
+                min_diff.append(pred_mean - target_value)
+
+        print('the number of samples < 0.1:', len(min_diff))
+
+
+if __name__ == "__main__":
+    main()
