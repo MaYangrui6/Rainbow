@@ -10,6 +10,7 @@ from torch_geometric.nn import global_mean_pool as gap, global_max_pool as gmp
 from torch_geometric.loader import DataLoader
 from blitz.utils import variational_estimator
 from blitz.modules import BayesianLinear
+from torch.optim.lr_scheduler import StepLR
 import os
 import sys
 import random
@@ -376,9 +377,10 @@ class GraphEncoder(nn.Module):
 class ImprovementPredictionModelGNN(nn.Module):
     """使用图卷积神经网络进行预测，基于图编码，并增加多层贝叶斯线性层，融合配置向量."""
 
-    def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=2):
+    def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=3):
         print('start ImprovementPredictionModelGNN')
         super(ImprovementPredictionModelGNN, self).__init__()
+        self.dropout = nn.Dropout(p=0.3)
 
         # 图编码器
         self.graph_encoder = GraphEncoder(in_feats, edge_feats, graph_embedding_size)
@@ -409,6 +411,7 @@ class ImprovementPredictionModelGNN(nn.Module):
         # 第一个贝叶斯线性层
         x_ = self.blinear1(graph_embedding)
         x_ = self.batch_norm1(x_)
+        x_ = self.dropout(x_)
         x_ = F.leaky_relu(x_)
 
         # 中间贝叶斯线性层
@@ -416,6 +419,7 @@ class ImprovementPredictionModelGNN(nn.Module):
             x_ = layer(x_)
             x_ = batch_norm(x_)
             x_ = F.leaky_relu(x_)
+            x_ = self.dropout(x_)
 
         # 最后一层输出预测值
         output = self.blinear_out(x_)
@@ -543,6 +547,9 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss()  # 均方误差损失函数
 
+    # 初始化学习率调度器
+    scheduler = StepLR(optimizer, step_size=10, gamma=0.5)  # 每10个epoch将学习率减半
+
     model.train()
 
     print('start DeepApproximateMLL')
@@ -583,6 +590,10 @@ def main():
             print("Epoch %d batch_idx%d loss:" % (epoch + 1, batch_idx), loss.item())
 
         print(f'Epoch {epoch + 1}, Loss: {total_loss:.4f}')
+
+        if (epoch + 1) % 20 == 0:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] *= 0.5  # 将学习率减半
 
         # 随机抽取 20 个样本进行预测
         sample_indices = random.sample(range(len(data_loader.dataset)), 50)
