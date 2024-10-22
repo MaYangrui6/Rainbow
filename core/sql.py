@@ -1,8 +1,6 @@
 import os
 os.chdir("/home/ubuntu/project/mayang/LOGER")
 import sys
-# sys.path.append('/home/ubuntu/project/mayang/LOGER/psqlparse')
-# sys.path.append('/home/ubuntu/project/mayang/LOGER/lib')
 from psqlparse import parse_dict
 import torch
 import numpy as np

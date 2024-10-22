@@ -12,6 +12,7 @@ from gpytorch.likelihoods import GaussianLikelihood
 import os
 import sys
 import random
+
 loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
 # 将 QPE 目录添加到 sys.path
@@ -25,7 +26,6 @@ import re
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 # 获取 QPE 目录的绝对路径
 qpe_dir = os.path.abspath('/home/ubuntu/project/mayang')
 
@@ -35,19 +35,65 @@ sys.path.append(qpe_dir)
 # 现在尝试导入 TreeBuilder 类
 from QPE.sql2fea import TreeBuilder
 
+
+def clean_expression(expr):
+    """清理表达式中的多余空格和括号"""
+    # 移除首尾的空格
+    expr = expr.strip()
+
+    # 移除最外层的括号，如果存在
+    if expr.startswith('('):
+        expr = expr[1:].strip()
+    if expr.endswith(')'):
+        expr = expr[:-1].strip()
+
+    return expr
+
+
+def split_cmp_expression(cmp, num):
+    '''将含有 OR 或 AND 的表达式分割并提取每个子表达式，并保持原来的编号'''
+
+    # 移除最外层的括号
+    cmp = cmp.strip()
+    if cmp.startswith('(') and cmp.endswith(')'):
+        cmp = cmp[1:-1].strip()
+
+    # 按 OR 和 AND 分割
+    parts = re.split(r'(\s+OR\s+|\s+AND\s+)', cmp)
+
+    results = []
+    current_num = num
+
+    for part in parts:
+        part = clean_expression(part)  # 清理表达式
+
+        # 忽略分隔符 'OR' 和 'AND'
+        if part in ['OR', 'AND']:
+            continue
+
+        # 递归处理有内部括号的部分
+        if part.startswith('(') and part.endswith(')'):
+            nested_result = split_cmp_expression(part, current_num)
+            results.extend(nested_result)
+        else:
+            results.append((part, current_num))
+
+    return results
+
 def parse_attribute_config(index_str):
     '''处理输入的configuration，转化成cols/attribute的形式'''
     # 将字符串转换为列表
     index_list = ast.literal_eval(index_str)
-    
+
     table_cols_list = []
     for index in index_list:
         # 去掉 I() 的部分，提取表名和列名
         index_content = index[4:-1]  # 去掉前面的 'I(' 和后面的 ')'
         table_cols = index_content.split(',')
         table_cols_list.append(table_cols)
-    
+
     return table_cols_list
+
 
 def swap_join_condition(condition: str) -> str:
     '''防止同一个连接条件，左右连接条件不一样而无法识别'''
@@ -85,7 +131,9 @@ def convert_between_expression(cmp: str) -> str:
     match = re.match(r"([\w\.]+)\.(\w+)\s*BETWEEN\s*(.*)\s*AND\s*(.*)", cmp)
 
     if not match:
-        raise ValueError("The input string is not a valid BETWEEN expression.")
+        print('The input string is not a valid BETWEEN expression. cmp',cmp)
+        return cmp.split('.')
+        # raise ValueError("The input string is not a valid BETWEEN expression.")
 
     table_name, column, lower_bound, upper_bound = match.groups()
 
@@ -99,43 +147,56 @@ def convert_between_expression(cmp: str) -> str:
 
 
 def convert_to_text_comparison(cmp: str):
-    '''转化cmp与plan中的谓词表示, 处理 IN 语句。'''
-    match_eq = re.match(r"([\w\.]+)\.(\w+)\s*(=|<>|<|>|<=|>=)\s*'(.*)'", cmp)
-    match_in = re.match(r"([\w\.]+)\.(\w+)\s*IN\s*\((.*)\)", cmp, re.DOTALL)
+    '''转化cmp与plan中的谓词表示，处理 IN 和复杂的 OR 语句。'''
+
+    # 去除外部括号和空白
+    cmp = cmp.strip()
+    if cmp.startswith('(') and cmp.endswith(')'):
+        cmp = cmp[1:-1].strip()
+
+    # 处理 OR 语句，切割并处理第一个部分
+    if ' OR ' in cmp:
+        first_or_index = cmp.index(' OR ')
+        first_part = cmp[:first_or_index].strip()
+        return convert_to_text_comparison(first_part)
+
+    # 处理 AND 语句，切割并处理第一个部分
+    if ' AND ' in cmp:
+        first_and_index = cmp.index(' AND ')
+        first_part = cmp[:first_and_index].strip()
+        return convert_to_text_comparison(first_part)
+
+    # 处理 '=' 和 IN 语句
+    match_eq = re.match(r"\(?\s*([\w\.]+)\.(\w+)\s*(=|<>|<|>|<=|>=)\s*'([^']*)'\s*\)?", cmp)
+    match_in = re.match(r"\(?\s*([\w\.]+)\.(\w+)\s*IN\s*\((.*?)\)\s*\)?", cmp, re.DOTALL)
 
     if match_eq:
-        # 处理 '=' 比较
+        # 处理 '=' 等值比较的情况
         table_name, column, operator, value = match_eq.groups()
         new_expression = f"(({column})::text {operator} '{value}'::text)"
         return table_name, new_expression
+
     elif match_in:
-        # 处理 'IN' 比较
+        # 处理 'IN' 语句，提取表名、列名以及 IN 中的值列表
         table_name, column, values = match_in.groups()
 
-        # 使用正则提取引号中的值，允许多行
+        # 使用正则提取 IN 中的值，允许值跨多行
         value_list = re.findall(r"'(.*?)'", values)
         if not value_list:
             raise ValueError("在 IN 表达式中未找到有效值。")
 
-        # 检查是否存在嵌套括号
-        if '(' in values or ')' in values:
-            new_expression = f"(({column})::text = ANY ("
-            return table_name, new_expression
-
-        # 检查是否有值包含两个单词
-        if len(value_list) > 1 and any(len(value.split()) > 1 for value in value_list):
-            new_expression = f"(({column})::text = ANY ("
-            return table_name, new_expression
-
-        # 检查是否只有一个值
+        # 单个值的情况：转化为等值比较
         if len(value_list) == 1:
             new_expression = f"(({column})::text = '{value_list[0]}'::text)"
         else:
-            formatted_values = ','.join(value_list)  # 拼接多个值
+            # 多个值的情况：转化为 ANY 比较
+            formatted_values = ','.join(f"'{v}'" for v in value_list)
             new_expression = f"(({column})::text = ANY ('{{{formatted_values}}}'::text[]))"
 
         return table_name, new_expression
 
+    # 无法匹配时，抛出错误
+    print(f"无法匹配的输入: {cmp}")  # 调试信息
     raise ValueError("输入字符串不是有效的比较表达式。")
 
 
@@ -175,25 +236,50 @@ def transform_sql_like_condition(sql_condition):
     return table_name, transformed_clauses[0]
 
 
+# def delete_left_table_cond(sql_condition):
+#     # 使用正则表达式匹配表名和列名
+#     match = re.match(r"[\w\.]+\.(\w+)\s*=\s*(.*)", sql_condition)
+
+#     if not match:
+#         raise ValueError("The input string is not a valid comparison expression.")
+
+#     # 提取列名和右侧表达式
+#     column = match.group(1)
+#     right_side = match.group(2)
+
+#     return f"{column} = {right_side.strip()}"
 def delete_left_table_cond(sql_condition):
-    # 使用正则表达式匹配表名和列名
-    match = re.match(r"[\w\.]+\.(\w+)\s*=\s*(.*)", sql_condition)
+    # 扩展正则表达式，支持更多运算符并处理可能的括号
+    match = re.match(r"[\w\.]+\.(\w+)\s*(=|<>|<|>|<=|>=)\s*(.*)", sql_condition)
 
     if not match:
+        print('sql_condition', sql_condition)
         raise ValueError("The input string is not a valid comparison expression.")
 
-    # 提取列名和右侧表达式
+    # 提取列名、运算符和右侧表达式
     column = match.group(1)
-    right_side = match.group(2)
+    operator = match.group(2)
+    right_side = match.group(3)
 
-    return f"{column} = {right_side.strip()}"
+    # 返回去掉表名前缀的表达式
+    return f"{column} {operator} {right_side.strip()}"
 
 
-def dgl_node_and_edge_vectorization(sql_query, config_index, plan,attribute_dict):
+def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dict):
     sql_instance = Sql(sql_query)
 
     # 构建异构图
-    g, data_dict, node_indexes, edge_list = sql_instance.to_hetero_graph_dgl()
+    g, data_dict, node_indexes, edge_lists = sql_instance.to_hetero_graph_dgl()
+    #处理edge_list中一个语句存在很多and、or语句的情况
+    edge_list=[]
+    for cmp,num_table in edge_lists:
+        if 'BETWEEN' in cmp:
+            edge_list += [(cmp, num_table)]
+        elif 'OR' in cmp or 'AND' in cmp:
+            cmp_split=split_cmp_expression(cmp,num_table)
+            edge_list += cmp_split
+        else:
+            edge_list += [(cmp,num_table)]
     # 构建 node feature
     filter_features = g.ndata['filter']
     edge_features = g.ndata['edge']
@@ -263,38 +349,44 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan,attribute_dict
     # print('cmp',len(edge_list))
     # print(len(operator_vectors_cmp1),len(operator_vectors_cmp2))
     # 合并每一条边的向量
-    vector_cmp1 = torch.cat(operator_vectors_cmp1, dim=0)
-    vector_cmp2 = torch.cat(operator_vectors_cmp2, dim=0)
-    vector_edge = torch.cat((vector_cmp2, vector_cmp1), dim=0)
+    # 这个sql没有join关系：
+    if len(operator_vectors_cmp1):
+        vector_cmp1 = torch.cat(operator_vectors_cmp1, dim=0)
+        vector_cmp2 = torch.cat(operator_vectors_cmp2, dim=0)
+        vector_edge = torch.cat((vector_cmp2, vector_cmp1), dim=0)
+    else:
+        vector_edge = torch.cat(operator_vectors_cmp2, dim=0)
     # 添加自环
     for t in tables:
         new_u = torch.tensor([node_indexes['~' + t]])  # 自环的起点
         new_v = torch.tensor([node_indexes['~' + t]])  # 自环的终点
         g.add_edges(new_u, new_v)
     g.edata['feature'] = vector_edge
-    
-    #构建configuration特征
-    configuration_vector=[0]*len(attribute_dict)
+
+    # 构建configuration特征
+    configuration_vector = [0] * len(attribute_dict)
     for attrs in parse_attribute_config(config_index):
         for p in range(len(attrs)):
-            #获得在indexed_attribute中的位置
-            attr=attrs[p]
-            if attr[:2]=='C ':
-                attr=attr[2:]
-            attr_p=attribute_dict[attr]
-            configuration_vector[attr_p]+=1/(p+1)
+            # 获得在indexed_attribute中的位置
+            attr = attrs[p]
+            if attr[:2] == 'C ':
+                attr = attr[2:]
+            attr_p = attribute_dict[attr]
+            configuration_vector[attr_p] += 1 / (p + 1)
     g.global_data = {"configuration_vector": torch.tensor(configuration_vector)}
     return g
 
 
-def dgl_to_pyg(dgl_graph):
+def dgl_to_pyg(dgl_graph, label):
     """将 DGL 图转换为 PyG 格式."""
     x = dgl_graph.ndata['feature']  # 节点特征
     edge_index = torch.stack(dgl_graph.edges()).long()  # 边索引 (转换为 PyG 格式)
     edge_attr = dgl_graph.edata['feature']  # 边特征
-    configuration_vector = dgl_graph.global_data['configuration_vector'] # configuration_vector
+    configuration_vector = dgl_graph.global_data['configuration_vector']  # configuration_vector
     batch = torch.zeros(dgl_graph.number_of_nodes(), dtype=torch.long)  # 所有节点归为同一批次
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, configuration_vector=configuration_vector, batch=batch)
+    label_tensor = torch.tensor(label, dtype=torch.float32)  # 根据需要使用 float32 或其他类型
+    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, configuration_vector=configuration_vector,
+                y=label_tensor, batch=batch)
 
 
 # class GraphEncoder(nn.Module):
@@ -432,21 +524,20 @@ class GraphEncoder(nn.Module):
         return x
 
 
-
 class ImprovementPredictionModelGNN(nn.Module):
     """使用图卷积神经网络进行预测，基于图编码，并增加多层线性层，融合配置向量."""
-    
-    def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=1):
+
+    def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=3):
         print('start ImprovementPredictionModelGNN')
         super(ImprovementPredictionModelGNN, self).__init__()
-        
+
         # 图编码器
         self.graph_encoder = GraphEncoder(in_feats, edge_feats, graph_embedding_size)
-        
+
         # 定义多个全连接层
         self.layers = nn.ModuleList()
         self.batch_norms = nn.ModuleList()  # 批归一化层列表
-        
+
         # 第一层，从 (图嵌入维度 + 配置向量维度) 到隐藏层维度
         input_dim = graph_embedding_size * 2 + config_vector_size  # 2 * graph_embedding_size 因为全局池化时合并了 mean 和 max
         self.layers.append(nn.Linear(input_dim, hidden_dim))
@@ -456,52 +547,50 @@ class ImprovementPredictionModelGNN(nn.Module):
         for _ in range(num_layers - 2):
             self.layers.append(nn.Linear(hidden_dim, hidden_dim))
             self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
-        
+
         # 最后一层，隐藏层到输出维度
         self.layers.append(nn.Linear(hidden_dim, 1))  # 输出为单个值
-        
+
     def forward(self, x, edge_attr, edge_index, configuration_vector, batch_index):
         # 通过图编码器获取图的嵌入表示
         graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
-        
+
         # 拼接 graph_embedding 和 configuration_vector
         configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)  # 调整 configuration_vector 的形状
         graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
-        
+
         # 将拼接后的向量输入到多层全连接网络
         for i, layer in enumerate(self.layers[:-1]):
             graph_embedding = layer(graph_embedding)  # 全连接层
             graph_embedding = self.batch_norms[i](graph_embedding)  # 批归一化层
             graph_embedding = F.relu(graph_embedding)  # ReLU 激活函数
-        
+
         # 最后一层输出预测值
         output = self.layers[-1](graph_embedding)
-        prediction = F.relu(output)  # 使用 ReLU 激活函数保证输出非负数
-        
+        prediction = F.sigmoid(output)  # 使用 ReLU 激活函数保证输出非负数
+
         return prediction
-    
+
     def predict(self, x, edge_attr, edge_index, configuration_vector, batch_index):
         """在预测时调用"""
         self.eval()  # 设置为评估模式
         with torch.no_grad():
             graph_embedding = self.graph_encoder(x, edge_attr, edge_index, batch_index)
-            
+
             # 拼接 graph_embedding 和 configuration_vector
             configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)
             graph_embedding = torch.cat([graph_embedding, configuration_vector], dim=1)
-            
+
             # 通过多层全连接网络计算预测值
             for i, layer in enumerate(self.layers[:-1]):
                 graph_embedding = layer(graph_embedding)
                 graph_embedding = self.batch_norms[i](graph_embedding)
                 graph_embedding = F.relu(graph_embedding)
-                
+
             output = self.layers[-1](graph_embedding)
-            prediction = F.relu(output)  # 保证预测值为非负数
-            
+            prediction = F.sigmoid(output)  # 保证预测值为非负数
+
         return prediction
-
-
 
 
 def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=0, end_idx=8877):
@@ -528,18 +617,17 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
     # 设置数据库连接
     database.setup(dbname=dbname, user=user, password=password, host=host, port=port, cache=False)
     sql_graphs_pyg = []
-    #创建index的vector
-    attribute_num=0
-    attribute_dict={}
+    # 创建index的vector
+    attribute_num = 0
+    attribute_dict = {}
     for x in df['index'].values:
         for attrs in parse_attribute_config(x):
             for attr in attrs:
-                if attr[:2]=='C ':
-                    attr=attr[2:]
+                if attr[:2] == 'C ':
+                    attr = attr[2:]
                 if attr not in attribute_dict:
-                    attribute_dict[attr]=attribute_num
-                    attribute_num+=1
-
+                    attribute_dict[attr] = attribute_num
+                    attribute_num += 1
 
     query_list = df['query'].values
     quey_config_list = df['index'].values
@@ -550,7 +638,7 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
         print(i)
         g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i], attribute_dict)
         # 转换为 PyG 数据
-        pyg_data = dgl_to_pyg(g)
+        pyg_data = dgl_to_pyg(g, df['improvement'].values[i])
         sql_graphs_pyg.append(pyg_data)
 
     return sql_graphs_pyg, df['improvement'].values, len(attribute_dict)
@@ -559,13 +647,13 @@ num_edge_features = 15
 
     # 读取数据并设置数据库
 sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
-        csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
-        dbname='imdbload',
-        user='postgres',
-        password='password',
-        host='127.0.0.1',
-        port='5432',
-        start_idx=7
+    csv_path='/home/ubuntu/project/mayang/Classification/process_data/tpcds/dataset_tpcds_383_plan.csv',
+    dbname='indexselection_tpcds___1',
+    user='postgres',
+    password='password',
+    host='127.0.0.1',
+    port='5432',
+    start_idx=3286
     )
 print('len(label_list) 需要是batch_size的倍数', len(label_list))
 # 创建 PyG DataLoader
