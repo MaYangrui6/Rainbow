@@ -14,8 +14,8 @@ from torch.optim.lr_scheduler import StepLR
 import os
 import sys
 import random
-loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
+loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
 from core.models.DGP import DeepGPModel
 from core.models.DKL import DKLGPModel
@@ -131,7 +131,7 @@ def convert_between_expression(cmp: str) -> str:
     match = re.match(r"([\w\.]+)\.(\w+)\s*BETWEEN\s*(.*)\s*AND\s*(.*)", cmp)
 
     if not match:
-        print('The input string is not a valid BETWEEN expression. cmp',cmp)
+        print('The input string is not a valid BETWEEN expression. cmp', cmp)
         return cmp.split('.')
         # raise ValueError("The input string is not a valid BETWEEN expression.")
 
@@ -271,16 +271,16 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dic
 
     # 构建异构图
     g, data_dict, node_indexes, edge_lists = sql_instance.to_hetero_graph_dgl()
-    #处理edge_list中一个语句存在很多and、or语句的情况
-    edge_list=[]
-    for cmp,num_table in edge_lists:
+    # 处理edge_list中一个语句存在很多and、or语句的情况
+    edge_list = []
+    for cmp, num_table in edge_lists:
         if 'BETWEEN' in cmp:
             edge_list += [(cmp, num_table)]
         elif 'OR' in cmp or 'AND' in cmp:
-            cmp_split=split_cmp_expression(cmp,num_table)
+            cmp_split = split_cmp_expression(cmp, num_table)
             edge_list += cmp_split
         else:
-            edge_list += [(cmp,num_table)]
+            edge_list += [(cmp, num_table)]
     # 构建 node feature
     filter_features = g.ndata['filter']
     edge_features = g.ndata['edge']
@@ -390,7 +390,6 @@ def dgl_to_pyg(dgl_graph, label):
                 y=label_tensor, batch=batch)
 
 
-
 class GraphEncoder(nn.Module):
     """图编码模块，基于 TransformerConv,添加了残差连接。"""
 
@@ -468,11 +467,10 @@ class GraphEncoder(nn.Module):
 @variational_estimator
 class ImprovementPredictionModelGNN(nn.Module):
     """使用图卷积神经网络进行预测，基于图编码，并增加多层贝叶斯线性层，融合配置向量."""
+
     def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=3):
         print('start ImprovementPredictionModelGNN')
         super(ImprovementPredictionModelGNN, self).__init__()
-
-        self.dropout = nn.Dropout(p=0.3)
 
         # 图编码器
         self.graph_encoder = GraphEncoder(in_feats, edge_feats, graph_embedding_size)
@@ -504,7 +502,6 @@ class ImprovementPredictionModelGNN(nn.Module):
         # 第一个贝叶斯线性层
         x_ = self.blinear1(graph_embedding)
         x_ = self.batch_norm1(x_)
-        x_ = self.dropout(x_)
         x_ = F.leaky_relu(x_)
 
         # 中间贝叶斯线性层
@@ -512,7 +509,6 @@ class ImprovementPredictionModelGNN(nn.Module):
             x_ = layer(x_)
             x_ = batch_norm(x_)
             x_ = F.leaky_relu(x_)
-            x_ = self.dropout(x_)
 
         # 最后一层输出预测值
         output = self.blinear_out(x_)
@@ -526,6 +522,7 @@ class ImprovementPredictionModelGNN(nn.Module):
         with torch.no_grad():
             prediction = self.forward(x, edge_attr, edge_index, configuration_vector, batch_index)
         return prediction
+
 
 def evaluate_regression(regressor,
                         X,
@@ -588,26 +585,53 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
         print(i)
         g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i], attribute_dict)
         # 转换为 PyG 数据
-        pyg_data = dgl_to_pyg(g, df['label'].values[i])
+        pyg_data = dgl_to_pyg(g, df['improvement'].values[i])
         sql_graphs_pyg.append(pyg_data)
 
-    return sql_graphs_pyg, df['label'].values, len(attribute_dict)
+    return sql_graphs_pyg, df['improvement'].values, len(attribute_dict)
+
+
+def calculate_qerror_list(pred_list, valid_list):
+    y_pred_list = [1 - x for x in pred_list]
+    y_valid_list = [1 - x for x in valid_list]
+    q_errors = []
+    for pred, valid in zip(y_pred_list, y_valid_list):
+        pred = pred + 1e-4  # 避免除零错误
+        valid = valid + 1e-4
+
+        q_error = max(pred / valid, valid / pred)
+        q_errors.append(q_error)
+    # 计算均值
+    mean_q_error = np.mean(q_errors)
+
+    # 计算 90% 和 95% 分位数
+    percentile_90 = np.percentile(q_errors, 90)
+    percentile_95 = np.percentile(q_errors, 95)
+
+    # 输出结果
+    print(f"Mean QError: {mean_q_error}")
+    print(f"90th Percentile QError: {percentile_90}")
+    print(f"95th Percentile QError: {percentile_95}")
+    print(f"Max QError: {max(q_errors)}")
+
+    return q_errors
+
 
 def main():
-    data_loader_file = '/tmp/data_loader.pkl'
+    data_loader_file = '/tmp/tpcds_1_data_loader.pkl'
     data_loader = None
 
     # 检查是否已有保存的DataLoader
     if not os.path.exists(data_loader_file):
         # 读取数据并设置数据库
         sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
-            csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
-            dbname='imdbload',
+            csv_path='/home/ubuntu/project/mayang/Classification/process_data/tpcds_1/tpcds_train_l.csv',
+            dbname='indexselection_tpcds___1',
             user='postgres',
             password='password',
             host='127.0.0.1',
             port='5432',
-            start_idx=7
+            start_idx=0
         )
 
         print('len(label_list) 需要是batch_size的倍数:', len(label_list))
@@ -707,6 +731,37 @@ def main():
                 min_diff.append(pred_mean - target_value)
 
         print('the number of samples < 0.1:', len(min_diff))
+
+        if (epoch + 1) % 10 == 0:
+            print('*************** Testing *****************')
+            diff_list = []
+            pred_list = []
+            label_list = []
+            for idx in range(len(data_loader.dataset)):
+                sample_batch = data_loader.dataset[idx]
+                sample_x = sample_batch.x
+                sample_edge_attr = sample_batch.edge_attr
+                sample_edge_index = sample_batch.edge_index
+                sample_configuration_vector = sample_batch.configuration_vector
+
+                # 获取对应的 target 值
+                target_value = sample_batch.y.item()
+                label_list.append(target_value)
+                # print(target_value)
+                model.eval()
+                with torch.no_grad():
+                    pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index,
+                                              sample_configuration_vector,
+                                              sample_batch.batch).item()
+                    pred_list.append(pred_mean)
+                # print(
+                #     f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}, difference: {pred_mean - target_value}')
+                diff_list.append(pred_mean - target_value)
+
+            q_errors = calculate_qerror_list(pred_list, label_list)
+            print(q_errors[:10])
+            less_1=[x for x in diff_list if abs(x)<0.1]
+            print(f'total distance number: {len(less_1)} / {len(diff_list)}, ratio: {100*len(less_1)/len(diff_list)}')
 
 
 if __name__ == "__main__":
