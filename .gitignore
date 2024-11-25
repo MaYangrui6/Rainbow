@@ -1,3 +1,6 @@
 .idea
 *.pkl
 RIBE/
+experiment/tpcds/
+experiment/job/
+core/infer_model/
