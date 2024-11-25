@@ -183,7 +183,9 @@ def convert_to_text_comparison(cmp: str):
         # 使用正则提取 IN 中的值，允许值跨多行
         value_list = re.findall(r"'(.*?)'", values)
         if not value_list:
-            raise ValueError("在 IN 表达式中未找到有效值。")
+            print('error cmp',cmp)
+            return cmp.split('.')[:2]
+            # raise ValueError("在 IN 表达式中未找到有效值。")
 
         # 单个值的情况：转化为等值比较
         if len(value_list) == 1:
@@ -197,6 +199,7 @@ def convert_to_text_comparison(cmp: str):
 
     # 无法匹配时，抛出错误
     print(f"无法匹配的输入: {cmp}")  # 调试信息
+    return cmp.split('.')[:2]
     raise ValueError("输入字符串不是有效的比较表达式。")
 
 
@@ -618,15 +621,15 @@ def calculate_qerror_list(pred_list, valid_list):
 
 
 def main():
-    data_loader_file = '/tmp/tpcds_1_data_loader.pkl'
+    data_loader_file = '/tmp/tpcds_10_data_loader_gen.pkl'
     data_loader = None
 
     # 检查是否已有保存的DataLoader
     if not os.path.exists(data_loader_file):
         # 读取数据并设置数据库
         sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
-            csv_path='/home/ubuntu/project/mayang/Classification/process_data/tpcds_1/tpcds_train_l.csv',
-            dbname='indexselection_tpcds___1',
+            csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
+            dbname='imdbload',
             user='postgres',
             password='password',
             host='127.0.0.1',
@@ -724,7 +727,7 @@ def main():
             model.eval()
             with torch.no_grad():
                 pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector,
-                                          sample_batch.batch)
+                                          sample_batch.batch).item()
             print(
                 f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}, difference: {pred_mean - target_value}')
             if abs(pred_mean - target_value) < 0.1:
@@ -732,7 +735,7 @@ def main():
 
         print('the number of samples < 0.1:', len(min_diff))
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 5 == 0:
             print('*************** Testing *****************')
             diff_list = []
             pred_list = []
@@ -762,6 +765,41 @@ def main():
             print(q_errors[:10])
             less_1=[x for x in diff_list if abs(x)<0.1]
             print(f'total distance number: {len(less_1)} / {len(diff_list)}, ratio: {100*len(less_1)/len(diff_list)}')
+
+        if (epoch + 1) % 5 == 0:
+            print('*************** Testing *****************')
+            diff_list = []
+            pred_list = []
+            label_list = []
+            for idx in range(len(data_loader.dataset)):
+                sample_batch = data_loader.dataset[idx]
+                sample_x = sample_batch.x
+                sample_edge_attr = sample_batch.edge_attr
+                sample_edge_index = sample_batch.edge_index
+                sample_configuration_vector = sample_batch.configuration_vector
+
+                # 获取对应的 target 值
+                target_value = sample_batch.y.item()
+                label_list.append(target_value)
+                # print(target_value)
+                model.eval()
+                with torch.no_grad():
+                    pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index,
+                                              sample_configuration_vector,
+                                              sample_batch.batch).item()
+                    pred_list.append(pred_mean)
+                # print(
+                #     f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}, difference: {pred_mean - target_value}')
+                diff_list.append(pred_mean - target_value)
+
+            q_errors = calculate_qerror_list(pred_list, label_list)
+            print(q_errors[:10])
+            less_1 = [x for x in diff_list if abs(x) < 0.1]
+            print(
+                f'total distance number: {len(less_1)} / {len(diff_list)}, ratio: {100 * len(less_1) / len(diff_list)}')
+            model_save_path = f'/home/ubuntu/project/mayang/LOGER/core/infer_model/job/trained_model_epoch_{epoch + 1}.pth'  # 选择保存的路径和文件名
+            torch.save(model.state_dict(), model_save_path)
+            print(f'Model saved to {model_save_path}')
 
 
 if __name__ == "__main__":

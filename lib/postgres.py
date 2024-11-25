@@ -40,7 +40,7 @@ PG_STATS_INFO = "select " \
                 "schemaname = %s and tablename = %s and attname = %s;"
 
 def connect() -> extensions.connection:
-    return psycopg2.connect(dbname='indexselection_tpcds___1', user='postgres', password='password', host='127.0.0.1', port='5432')
+    return psycopg2.connect(dbname='imdbload', user='postgres', password='password', host='127.0.0.1', port='5432')
 
 
 def set_seed(connection, seed):
