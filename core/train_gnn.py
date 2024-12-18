@@ -14,8 +14,8 @@ from torch.optim.lr_scheduler import StepLR
 import os
 import sys
 import random
-loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
+loger_dir = os.path.abspath('/home/ubuntu/project/mayang/LOGER')
 
 from core.models.DGP import DeepGPModel
 from core.models.DKL import DKLGPModel
@@ -24,6 +24,10 @@ from core import database, Sql, Plan, load
 import ast
 import re
 import torch.nn.functional as F
+from torch_geometric.nn import GCNConv
+from torch_geometric.nn import ChebConv, TopKPooling
+from torch_geometric.nn import GATConv, TopKPooling
+from torch_geometric.nn import global_mean_pool as gmp, global_add_pool as gap
 
 # 获取 QPE 目录的绝对路径
 qpe_dir = os.path.abspath('/home/ubuntu/project/rainbow')
@@ -131,7 +135,7 @@ def convert_between_expression(cmp: str) -> str:
     match = re.match(r"([\w\.]+)\.(\w+)\s*BETWEEN\s*(.*)\s*AND\s*(.*)", cmp)
 
     if not match:
-        print('The input string is not a valid BETWEEN expression. cmp',cmp)
+        print('The input string is not a valid BETWEEN expression. cmp', cmp)
         return cmp.split('.')
         # raise ValueError("The input string is not a valid BETWEEN expression.")
 
@@ -183,7 +187,8 @@ def convert_to_text_comparison(cmp: str):
         # 使用正则提取 IN 中的值，允许值跨多行
         value_list = re.findall(r"'(.*?)'", values)
         if not value_list:
-            raise ValueError("在 IN 表达式中未找到有效值。")
+            return cmp.split('.')
+            # raise ValueError("在 IN 表达式中未找到有效值。")
 
         # 单个值的情况：转化为等值比较
         if len(value_list) == 1:
@@ -271,16 +276,16 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dic
 
     # 构建异构图
     g, data_dict, node_indexes, edge_lists = sql_instance.to_hetero_graph_dgl()
-    #处理edge_list中一个语句存在很多and、or语句的情况
-    edge_list=[]
-    for cmp,num_table in edge_lists:
+    # 处理edge_list中一个语句存在很多and、or语句的情况
+    edge_list = []
+    for cmp, num_table in edge_lists:
         if 'BETWEEN' in cmp:
             edge_list += [(cmp, num_table)]
         elif 'OR' in cmp or 'AND' in cmp:
-            cmp_split=split_cmp_expression(cmp,num_table)
+            cmp_split = split_cmp_expression(cmp, num_table)
             edge_list += cmp_split
         else:
-            edge_list += [(cmp,num_table)]
+            edge_list += [(cmp, num_table)]
     # 构建 node feature
     filter_features = g.ndata['filter']
     edge_features = g.ndata['edge']
@@ -372,6 +377,9 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dic
             attr = attrs[p]
             if attr[:2] == 'C ':
                 attr = attr[2:]
+            # 构建configuration特征(剔除与sql不相关的index，不在sql.txt中的index)
+            # if attr.split('.')[1] not in sql_query:
+            #     continue
             attr_p = attribute_dict[attr]
             configuration_vector[attr_p] += 1 / (p + 1)
     g.global_data = {"configuration_vector": torch.tensor(configuration_vector)}
@@ -388,7 +396,6 @@ def dgl_to_pyg(dgl_graph, label):
     label_tensor = torch.tensor(label, dtype=torch.float32)  # 根据需要使用 float32 或其他类型
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, configuration_vector=configuration_vector,
                 y=label_tensor, batch=batch)
-
 
 
 class GraphEncoder(nn.Module):
@@ -465,17 +472,150 @@ class GraphEncoder(nn.Module):
         return x
 
 
+class GraphEncoder_GATConv(nn.Module):
+    def __init__(self, in_feats, edge_feats, embedding_size, num_layers=3, top_k_every_n=3, top_k_ratio=0.5, n_heads=4,
+                 dropout_rate=0.5):
+        super(GraphEncoder_GATConv, self).__init__()
+        self.embedding_size = embedding_size
+        self.top_k_every_n = top_k_every_n
+        self.edge_dim = edge_feats
+        self.n_heads = n_heads
+
+        # 使用 GATConv 替代 GCNConv
+        self.conv1 = GATConv(in_feats, self.embedding_size, heads=n_heads, dropout=dropout_rate)
+        self.transf1 = nn.Linear(self.embedding_size * n_heads, self.embedding_size)  # *n_heads because GAT has multiple heads
+        self.bn1 = nn.BatchNorm1d(self.embedding_size)
+
+        # 其他 GATConv 层及池化层
+        self.conv_layers = nn.ModuleList()
+        self.transf_layers = nn.ModuleList()
+        self.bn_layers = nn.ModuleList()
+        self.pooling_layers = nn.ModuleList()
+
+        for _ in range(num_layers):
+            self.conv_layers.append(
+                GATConv(self.embedding_size, self.embedding_size, heads=n_heads, dropout=dropout_rate)  # GATConv with multiple heads
+            )
+            self.transf_layers.append(nn.Linear(self.embedding_size * n_heads, self.embedding_size))
+            self.bn_layers.append(nn.BatchNorm1d(self.embedding_size))
+            self.pooling_layers.append(TopKPooling(self.embedding_size, ratio=top_k_ratio))
+
+    def forward(self, x, edge_attr, edge_index, batch_index):
+        # 前向传播保持不变
+        residual = x
+
+        # 第一层 GATConv
+        x = self.conv1(x, edge_index, edge_attr)  # GATConv
+        x = torch.relu(self.transf1(x.view(-1, self.embedding_size * self.n_heads)))  # Reshape due to multiple heads
+        x = self.bn1(x)
+
+        # 残差连接
+        if residual.shape == x.shape:
+            x = x + residual  # 进行残差连接
+
+        global_representation = []
+
+        for i, conv_layer in enumerate(self.conv_layers):
+            residual = x
+            x = conv_layer(x, edge_index, edge_attr)  # GATConv
+            x = torch.relu(self.transf_layers[i](x.view(-1, self.embedding_size * self.n_heads)))  # Reshape
+            x = self.bn_layers[i](x)
+
+            # 残差连接
+            if residual.shape == x.shape:
+                x = x + residual
+
+            if i % self.top_k_every_n == 0 or i == len(self.conv_layers) - 1:
+                x, edge_index, edge_attr, batch_index, _, _ = self.pooling_layers[i](
+                    x, edge_index, edge_attr, batch_index
+                )
+                global_representation.append(torch.cat([gmp(x, batch_index), gap(x, batch_index)], dim=1))
+
+        # 全局表示
+        x = sum(global_representation)
+
+        return x
+
+
+class GraphEncoder_ChebConv(nn.Module):
+    """图编码模块，基于 ChebConv，添加了残差连接。"""
+
+    def __init__(self, in_feats, edge_feats, embedding_size, num_layers=3, top_k_every_n=3, top_k_ratio=0.5, n_heads=4,
+                 dropout_rate=0.5, K=3):
+        super(GraphEncoder_ChebConv, self).__init__()
+        self.embedding_size = embedding_size
+        self.top_k_every_n = top_k_every_n
+        self.edge_dim = edge_feats
+        self.n_heads = n_heads
+        self.K = K  # 设置 ChebConv 的阶数
+
+        # 第一层 ChebConv
+        self.conv1 = ChebConv(in_feats, self.embedding_size, K=self.K)
+        self.transf1 = nn.Linear(self.embedding_size, self.embedding_size)
+        self.bn1 = nn.BatchNorm1d(self.embedding_size)
+
+        # 其他 ChebConv 层及 TopKPooling
+        self.conv_layers = nn.ModuleList()
+        self.transf_layers = nn.ModuleList()
+        self.bn_layers = nn.ModuleList()
+        self.pooling_layers = nn.ModuleList()
+
+        for _ in range(num_layers):
+            self.conv_layers.append(
+                ChebConv(self.embedding_size, self.embedding_size, K=self.K)  # 使用 ChebConv 替代 TransformerConv
+            )
+            self.transf_layers.append(nn.Linear(self.embedding_size, self.embedding_size))
+            self.bn_layers.append(nn.BatchNorm1d(self.embedding_size))
+            self.pooling_layers.append(TopKPooling(self.embedding_size, ratio=top_k_ratio))
+
+    def forward(self, x, edge_attr, edge_index, batch_index):
+        # 前向传播保持不变
+        residual = x
+
+        # 第一层
+        x = self.conv1(x, edge_index)
+        x = torch.relu(self.transf1(x))
+        x = self.bn1(x)
+
+        # 残差连接
+        if residual.shape == x.shape:
+            x = x + residual  # 进行残差连接
+
+        global_representation = []
+
+        for i, conv_layer in enumerate(self.conv_layers):
+            residual = x
+            x = conv_layer(x, edge_index)
+            x = torch.relu(self.transf_layers[i](x))
+            x = self.bn_layers[i](x)
+
+            # 残差连接
+            if residual.shape == x.shape:
+                x = x + residual
+
+            if i % self.top_k_every_n == 0 or i == len(self.conv_layers) - 1:
+                x, edge_index, edge_attr, batch_index, _, _ = self.pooling_layers[i](
+                    x, edge_index, edge_attr, batch_index
+                )
+                global_representation.append(torch.cat([gmp(x, batch_index), gap(x, batch_index)], dim=1))
+
+        # 全局表示
+        x = sum(global_representation)
+
+        return x
+
+
+
 @variational_estimator
 class ImprovementPredictionModelGNN(nn.Module):
     """使用图卷积神经网络进行预测，基于图编码，并增加多层贝叶斯线性层，融合配置向量."""
+
     def __init__(self, in_feats, edge_feats, graph_embedding_size, config_vector_size, hidden_dim=128, num_layers=3):
         print('start ImprovementPredictionModelGNN')
         super(ImprovementPredictionModelGNN, self).__init__()
 
-        self.dropout = nn.Dropout(p=0.3)
-
         # 图编码器
-        self.graph_encoder = GraphEncoder(in_feats, edge_feats, graph_embedding_size)
+        self.graph_encoder = GraphEncoder_GATConv(in_feats, edge_feats, graph_embedding_size)
 
         # 定义贝叶斯线性层
         input_dim = graph_embedding_size * 2 + config_vector_size
@@ -504,7 +644,6 @@ class ImprovementPredictionModelGNN(nn.Module):
         # 第一个贝叶斯线性层
         x_ = self.blinear1(graph_embedding)
         x_ = self.batch_norm1(x_)
-        x_ = self.dropout(x_)
         x_ = F.leaky_relu(x_)
 
         # 中间贝叶斯线性层
@@ -512,7 +651,6 @@ class ImprovementPredictionModelGNN(nn.Module):
             x_ = layer(x_)
             x_ = batch_norm(x_)
             x_ = F.leaky_relu(x_)
-            x_ = self.dropout(x_)
 
         # 最后一层输出预测值
         output = self.blinear_out(x_)
@@ -526,6 +664,7 @@ class ImprovementPredictionModelGNN(nn.Module):
         with torch.no_grad():
             prediction = self.forward(x, edge_attr, edge_index, configuration_vector, batch_index)
         return prediction
+
 
 def evaluate_regression(regressor,
                         X,
@@ -579,6 +718,10 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
                     attribute_dict[attr] = attribute_num
                     attribute_num += 1
 
+    # 保存 attribute_dict 到文件
+    with open('/home/ubuntu/project/mayang/LOGER/core/infer_model/job/attribute_dict.pkl', 'wb') as f:
+        pickle.dump(attribute_dict, f)
+    print("saved attribute_dict.pkl")
     query_list = df['query'].values
     quey_config_list = df['index'].values
     query_plans = df['query_plan_no_index'].values
@@ -593,13 +736,43 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
 
     return sql_graphs_pyg, df['label'].values, len(attribute_dict)
 
+
+def calculate_qerror_list(pred_list, valid_list):
+    y_pred_list = [1 - x for x in pred_list]
+    y_valid_list = [1 - x for x in valid_list]
+    q_errors = []
+    for pred, valid in zip(y_pred_list, y_valid_list):
+        pred = pred + 1e-4  # 避免除零错误
+        valid = valid + 1e-4
+
+        q_error = max(pred / valid, valid / pred)
+        q_errors.append(q_error)
+    # 计算均值
+    mean_q_error = np.mean(q_errors)
+
+    # 计算 90% 和 95% 分位数
+    percentile_90 = np.percentile(q_errors, 90)
+    percentile_95 = np.percentile(q_errors, 95)
+
+    # 输出结果
+    print(f"Mean QError: {mean_q_error}")
+    print(f"90th Percentile QError: {percentile_90}")
+    print(f"95th Percentile QError: {percentile_95}")
+    print(f"Max QError: {max(q_errors)}")
+
+    return q_errors
+
+
 def main():
-    data_loader_file = '/tmp/data_loader.pkl'
+    data_loader_file = '/tmp/test.pkl'
     data_loader = None
 
     # 检查是否已有保存的DataLoader
     if not os.path.exists(data_loader_file):
         # 读取数据并设置数据库
+        # tpcds-10:/home/ubuntu/project/mayang/Classification/process_data/tpcds/tpcds_train_l.csv
+        # tpcds-1:/home/ubuntu/project/mayang/Classification/process_data/tpcds_1/tpcds_train_l.csv
+
         sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
             csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
             dbname='imdbload',
@@ -607,7 +780,7 @@ def main():
             password='password',
             host='127.0.0.1',
             port='5432',
-            start_idx=7
+            start_idx=0
         )
 
         print('len(label_list) 需要是batch_size的倍数:', len(label_list))
@@ -634,6 +807,9 @@ def main():
         graph_embedding_size=32,
         config_vector_size=data_loader.dataset[0].configuration_vector.shape[0]
     )
+    print("paramter :",data_loader.dataset[0].x.shape[1],
+        data_loader.dataset[0].edge_attr.shape[1],
+        data_loader.dataset[0].configuration_vector.shape[0])
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss()  # 均方误差损失函数
@@ -649,7 +825,7 @@ def main():
         for batch_idx, batch in enumerate(data_loader):
             optimizer.zero_grad()
 
-            target = batch.y.view(-1, 1)
+            target = torch.clamp(batch.y.view(-1, 1),min=0)
 
             inputs = (batch.x, batch.edge_attr, batch.edge_index, batch.configuration_vector, batch.batch)
 
@@ -696,7 +872,7 @@ def main():
             sample_configuration_vector = sample_batch.configuration_vector
 
             # 获取对应的 target 值
-            target_value = sample_batch.y
+            target_value = torch.clamp(sample_batch.y,min=0)
             model.eval()
             with torch.no_grad():
                 pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index, sample_configuration_vector,
@@ -707,6 +883,42 @@ def main():
                 min_diff.append(pred_mean - target_value)
 
         print('the number of samples < 0.1:', len(min_diff))
+
+        if (epoch + 1) % 3 == 0:
+            print('*************** Testing *****************')
+            diff_list = []
+            pred_list = []
+            label_list = []
+            for idx in range(len(data_loader.dataset)):
+                sample_batch = data_loader.dataset[idx]
+                sample_x = sample_batch.x
+                sample_edge_attr = sample_batch.edge_attr
+                sample_edge_index = sample_batch.edge_index
+                sample_configuration_vector = sample_batch.configuration_vector
+
+                # 获取对应的 target 值
+                target_value = sample_batch.y.item()
+                if target_value<0:
+                    target_value=0
+                label_list.append(target_value)
+                # print(target_value)
+                model.eval()
+                with torch.no_grad():
+                    pred_mean = model.predict(sample_x, sample_edge_attr, sample_edge_index,
+                                              sample_configuration_vector,
+                                              sample_batch.batch).item()
+                    pred_list.append(pred_mean)
+                # print(
+                #     f'Sample Index: {idx}, Predicted Mean: {pred_mean}, Target Value: {target_value}, difference: {pred_mean - target_value}')
+                diff_list.append(pred_mean - target_value)
+
+            q_errors = calculate_qerror_list(pred_list, label_list)
+            print(q_errors[:10])
+            less_1=[x for x in diff_list if abs(x)<0.1]
+            print(f'total distance number: {len(less_1)} / {len(diff_list)}, ratio: {100*len(less_1)/len(diff_list)}')
+            model_save_path = f'/home/ubuntu/project/mayang/LOGER/core/infer_model/job/abla/trained_model_epoch_{epoch + 1}.pth'  # 选择保存的路径和文件名
+            torch.save(model.state_dict(), model_save_path)
+            print(f'Model saved to {model_save_path}')
 
 
 if __name__ == "__main__":

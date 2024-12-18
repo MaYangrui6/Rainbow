@@ -48,6 +48,7 @@ class _global:
     def __cache_backup(self):
         if self.__db is None:
             return
+        print("road:",f'{self.name}.cache.pkl')
         with open(f'.{self.name}.cache.pkl', 'wb') as f:
             pickle.dump(self.__boundary_cache, f)
             pickle.dump(self.__selectivity_cache, f)
@@ -60,6 +61,7 @@ class _global:
         if self.__db is None:
             return
         filename = f'.{self.name}.cache.pkl'
+        print("road:",filename)
         if not os.path.isfile(filename):
             return
         with open(filename, 'rb') as f:
@@ -87,6 +89,7 @@ class _global:
 
     def setup(self, *args, **kwargs):
         print(kwargs)
+        print('here')
         assert 'dbname' in kwargs
         if 'cache' in kwargs:
             self.use_cache = bool(kwargs['cache'])
@@ -2204,9 +2207,15 @@ class Sql:
         self.selectivities = [0 for i in range(database.schema.total_columns)]
 
         for cmp in self.comparisons:
-            self.all_cmp.append((str(cmp),len(cmp.aliasname_set)))
+            flag=1
+            #or语句造成table数量匹配错误
+            if '=' not in str(cmp):
+                flag=0
+                self.all_cmp.append((str(cmp), 1))
+            else:
+                self.all_cmp.append((str(cmp),len(cmp.aliasname_set)))
             concerned = cmp.concerned_aliases
-            if len(cmp.aliasname_set) == 2 and len(cmp.aliasname_list) == 2:
+            if len(cmp.aliasname_set) == 2 and len(cmp.aliasname_list) == 2 and flag:
                 # between two columns
                 left_alias, right_alias = cmp.aliasname_list
 
@@ -2317,7 +2326,7 @@ class Sql:
                     # TODO: to handle complicated single-table predicates
                     pass
             else:
-                if len(cmp.aliasname_set) == 2:
+                if len(cmp.aliasname_set) == 2 and flag:
                     left_alias, right_alias = cmp.aliasname_set
                     left_edge = self.join_edges.setdefault(left_alias, [])
                     right_edge = self.join_edges.setdefault(right_alias, [])
@@ -2413,19 +2422,25 @@ class Sql:
             table_globals.append(self.table_feature_global[alias])
             table_onehots.append(self.table_feature_onehot[alias])
             table_others.append(self.table_feature_others[alias])
+            
 
         table_to_table_edge_temp = []
         for left_alias, right_alias in table_to_table_temp:
             table_to_table_edge_temp.append([node_indexes['~' + left_alias], node_indexes['~' + right_alias]])
 
+        # print('table_filters',table_filters)
+        num_nodes = len(table_nodes_temp)  # 这里获取节点数量
+        
         data_dict = {}
         x_dict = {
-            'table_filter': torch.cat(table_filters, dim=0),
-            'table_filter_mask': torch.cat(table_filter_masks, dim=0),
-            'table_edge': torch.cat(table_edge_features, dim=0), 'table_global': torch.cat(table_globals, dim=0),
-            'table_onehot': torch.stack(table_onehots, dim=0),
-            'table_others': torch.cat(table_others, dim=0),
+            'table_filter': torch.cat(table_filters, dim=0) if table_filters else torch.zeros(num_nodes, database.schema.max_columns, dtype=torch.float32, device=self.device),
+            'table_filter_mask': torch.cat(table_filter_masks, dim=0) if table_filter_masks else torch.zeros(num_nodes, database.schema.max_columns, dtype=torch.float32, device=self.device),
+            'table_edge': torch.cat(table_edge_features, dim=0) if table_edge_features else torch.zeros(num_nodes, database.schema.max_columns, device=self.device, dtype=torch.long),
+            'table_global': torch.cat(table_globals, dim=0) if table_globals else torch.zeros(num_nodes, dtype=torch.float32, device=self.device),
+            'table_onehot': torch.stack(table_onehots, dim=0) if table_onehots else torch.zeros(num_nodes, database.schema.table_onehot(None).shape[0], dtype=torch.float32, device=self.device),
+            'table_others': torch.cat(table_others, dim=0) if table_others else torch.zeros(num_nodes, 12 * database.schema.max_columns, dtype=torch.float32, device=self.device),
         }
+
 
         edge = torch.tensor(table_to_table_edge_temp, device=self.device, dtype=torch.long)
         if torch.numel(edge) == 0:

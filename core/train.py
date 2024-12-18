@@ -22,6 +22,7 @@ from sql import Sql, _global
 from core import database, Sql, Plan, load
 import ast
 import re
+import numpy as np
 
 # 获取 QPE 目录的绝对路径
 qpe_dir = os.path.abspath('/home/ubuntu/project/mayang')
@@ -465,7 +466,7 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
 
 
 if __name__ == "__main__":
-    num_edge_features = 49
+    num_edge_features = 15
 
     # 读取数据并设置数据库
     sql_graphs_pyg, label_list = load_sql_graphs_pyg(
