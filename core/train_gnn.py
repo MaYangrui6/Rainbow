@@ -731,19 +731,17 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
         print(i)
         g = dgl_node_and_edge_vectorization(query_list[i], quey_config_list[i], query_plans[i], attribute_dict)
         # 转换为 PyG 数据
-        pyg_data = dgl_to_pyg(g, df['label'].values[i])
+        pyg_data = dgl_to_pyg(g, df['improvement'].values[i])
         sql_graphs_pyg.append(pyg_data)
 
-    return sql_graphs_pyg, df['label'].values, len(attribute_dict)
+    return sql_graphs_pyg, df['improvement'].values, len(attribute_dict)
 
 
 def calculate_qerror_list(pred_list, valid_list):
-    y_pred_list = [1 - x for x in pred_list]
-    y_valid_list = [1 - x for x in valid_list]
     q_errors = []
-    for pred, valid in zip(y_pred_list, y_valid_list):
-        pred = pred + 1e-4  # 避免除零错误
-        valid = valid + 1e-4
+    for pred, valid in zip(pred_list, valid_list):
+        pred = pred + 1e-3  # 避免除零错误
+        valid = valid + 1e-3
 
         q_error = max(pred / valid, valid / pred)
         q_errors.append(q_error)
@@ -764,7 +762,7 @@ def calculate_qerror_list(pred_list, valid_list):
 
 
 def main():
-    data_loader_file = '/tmp/test.pkl'
+    data_loader_file = '/tmp/tpcds10_dataloader.pkl'
     data_loader = None
 
     # 检查是否已有保存的DataLoader
@@ -772,6 +770,7 @@ def main():
         # 读取数据并设置数据库
         # tpcds-10:/home/ubuntu/project/mayang/Classification/process_data/tpcds/tpcds_train_l.csv
         # tpcds-1:/home/ubuntu/project/mayang/Classification/process_data/tpcds_1/tpcds_train_l.csv
+        # job: /home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv
 
         sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
             csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
@@ -820,6 +819,7 @@ def main():
 
     print('start DeepApproximateMLL')
     iteration = 0
+    mean_qerror_list = []
     for epoch in range(50):
         total_loss = 0
         for batch_idx, batch in enumerate(data_loader):
@@ -884,7 +884,7 @@ def main():
 
         print('the number of samples < 0.1:', len(min_diff))
 
-        if (epoch + 1) % 3 == 0:
+        if (epoch + 1) % 2 == 0:
             print('*************** Testing *****************')
             diff_list = []
             pred_list = []
@@ -913,12 +913,15 @@ def main():
                 diff_list.append(pred_mean - target_value)
 
             q_errors = calculate_qerror_list(pred_list, label_list)
+            q_errors_mean=np.mean(q_errors)
+            mean_qerror_list.append(q_errors_mean)
+            print("mean_qerror_list ：",mean_qerror_list)
             print(q_errors[:10])
             less_1=[x for x in diff_list if abs(x)<0.1]
             print(f'total distance number: {len(less_1)} / {len(diff_list)}, ratio: {100*len(less_1)/len(diff_list)}')
-            model_save_path = f'/home/ubuntu/project/mayang/LOGER/core/infer_model/job/abla/trained_model_epoch_{epoch + 1}.pth'  # 选择保存的路径和文件名
-            torch.save(model.state_dict(), model_save_path)
-            print(f'Model saved to {model_save_path}')
+            # model_save_path = f'/home/ubuntu/project/mayang/LOGER/core/infer_model/job/abla/trained_model_epoch_{epoch + 1}.pth'  # 选择保存的路径和文件名
+            # torch.save(model.state_dict(), model_save_path)
+            # print(f'Model saved to {model_save_path}')
 
 
 if __name__ == "__main__":
