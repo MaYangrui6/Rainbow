@@ -762,7 +762,7 @@ def calculate_qerror_list(pred_list, valid_list):
 
 
 def main():
-    data_loader_file = '/tmp/tpcds10_dataloader.pkl'
+    data_loader_file = '/tmp/tpcds1_dataloader.pkl'
     data_loader = None
 
     # 检查是否已有保存的DataLoader
