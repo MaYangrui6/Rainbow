@@ -1882,4 +1882,222 @@ WHERE ci.note LIKE '%(voice)%'
   AND cn.id = mc.company_id
   AND ct.id = mc.company_type_id;
 
+SELECT MIN(mi.info) AS release_date,
+       MIN(t.title) AS youtube_movie
+FROM aka_title AS at,
+     company_name AS cn,
+     company_type AS ct,
+     info_type AS it1,
+     keyword AS k,
+     movie_companies AS mc,
+     movie_info AS mi,
+     movie_keyword AS mk,
+     title AS t
+WHERE cn.country_code = '[us]'
+  AND cn.name = 'YouTube'
+  AND it1.info = 'release dates'
+  AND mc.note LIKE '%(200%)%'
+  AND mc.note LIKE '%(worldwide)%'
+  AND mi.note LIKE '%internet%'
+  AND mi.info LIKE 'USA:% 200%'
+  AND t.production_year BETWEEN 2005 AND 2010
+  AND t.id = at.movie_id
+  AND t.id = mi.movie_id
+  AND t.id = mk.movie_id
+  AND t.id = mc.movie_id
+  AND mk.movie_id = mi.movie_id
+  AND mk.movie_id = mc.movie_id
+  AND mk.movie_id = at.movie_id
+  AND mi.movie_id = mc.movie_id
+  AND mi.movie_id = at.movie_id
+  AND mc.movie_id = at.movie_id
+  AND k.id = mk.keyword_id
+  AND it1.id = mi.info_type_id
+  AND cn.id = mc.company_id
+  AND ct.id = mc.company_type_id;
 
+
+SELECT MIN(t.title) AS movie_title
+FROM company_name AS cn,
+     keyword AS k,
+     movie_companies AS mc,
+     movie_keyword AS mk,
+     title AS t
+WHERE cn.country_code ='[de]'
+  AND k.keyword ='character-name-in-title'
+  AND cn.id = mc.company_id
+  AND mc.movie_id = t.id
+  AND t.id = mk.movie_id
+  AND mk.keyword_id = k.id
+  AND mc.movie_id = mk.movie_id;
+
+
+SELECT MIN(cn.name) AS movie_company,
+       MIN(mi_idx.info) AS rating,
+       MIN(t.title) AS western_violent_movie
+FROM company_name AS cn,
+     company_type AS ct,
+     info_type AS it1,
+     info_type AS it2,
+     keyword AS k,
+     kind_type AS kt,
+     movie_companies AS mc,
+     movie_info AS mi,
+     movie_info_idx AS mi_idx,
+     movie_keyword AS mk,
+     title AS t
+WHERE cn.country_code != '[us]'
+  AND it1.info = 'countries'
+  AND it2.info = 'rating'
+  AND k.keyword IN ('murder',
+                    'murder-in-title',
+                    'blood',
+                    'violence')
+  AND kt.kind IN ('movie',
+                  'episode')
+  AND mc.note NOT LIKE '%(USA)%'
+  AND mc.note LIKE '%(200%)%'
+  AND mi.info IN ('Germany',
+                  'German',
+                  'USA',
+                  'American')
+  AND mi_idx.info < '7.0'
+  AND t.production_year > 2009
+  AND kt.id = t.kind_id
+  AND t.id = mi.movie_id
+  AND t.id = mk.movie_id
+  AND t.id = mi_idx.movie_id
+  AND t.id = mc.movie_id
+  AND mk.movie_id = mi.movie_id
+  AND mk.movie_id = mi_idx.movie_id
+  AND mk.movie_id = mc.movie_id
+  AND mi.movie_id = mi_idx.movie_id
+  AND mi.movie_id = mc.movie_id
+  AND mc.movie_id = mi_idx.movie_id
+  AND k.id = mk.keyword_id
+  AND it1.id = mi.info_type_id
+  AND it2.id = mi_idx.info_type_id
+  AND ct.id = mc.company_type_id
+  AND cn.id = mc.company_id;
+
+
+SELECT MIN(chn.name) AS voiced_char_name,
+       MIN(n.name) AS voicing_actress_name,
+       MIN(t.title) AS kung_fu_panda
+FROM aka_name AS an,
+     char_name AS chn,
+     cast_info AS ci,
+     company_name AS cn,
+     info_type AS it,
+     keyword AS k,
+     movie_companies AS mc,
+     movie_info AS mi,
+     movie_keyword AS mk,
+     name AS n,
+     role_type AS rt,
+     title AS t
+WHERE ci.note IN ('(voice)',
+                  '(voice: Japanese version)',
+                  '(voice) (uncredited)',
+                  '(voice: English version)')
+  AND cn.country_code ='[us]'
+  AND cn.name = 'DreamWorks Animation'
+  AND it.info = 'release dates'
+  AND k.keyword IN ('hero',
+                    'martial-arts',
+                    'hand-to-hand-combat',
+                    'computer-animated-movie')
+  AND mi.info IS NOT NULL
+  AND (mi.info LIKE 'Japan:%201%'
+       OR mi.info LIKE 'USA:%201%')
+  AND n.gender ='f'
+  AND n.name LIKE '%An%'
+  AND rt.role ='actress'
+  AND t.production_year > 2010
+  AND t.title LIKE 'Kung Fu Panda%'
+  AND t.id = mi.movie_id
+  AND t.id = mc.movie_id
+  AND t.id = ci.movie_id
+  AND t.id = mk.movie_id
+  AND mc.movie_id = ci.movie_id
+  AND mc.movie_id = mi.movie_id
+  AND mc.movie_id = mk.movie_id
+  AND mi.movie_id = ci.movie_id
+  AND mi.movie_id = mk.movie_id
+  AND ci.movie_id = mk.movie_id
+  AND cn.id = mc.company_id
+  AND it.id = mi.info_type_id
+  AND n.id = ci.person_id
+  AND rt.id = ci.role_id
+  AND n.id = an.person_id
+  AND ci.person_id = an.person_id
+  AND chn.id = ci.person_role_id
+  AND k.id = mk.keyword_id;
+
+
+SELECT MIN(an.name) AS cool_actor_pseudonym,
+       MIN(t.title) AS series_named_after_char
+FROM aka_name AS an,
+     cast_info AS ci,
+     company_name AS cn,
+     keyword AS k,
+     movie_companies AS mc,
+     movie_keyword AS mk,
+     name AS n,
+     title AS t
+WHERE cn.country_code ='[us]'
+  AND k.keyword ='character-name-in-title'
+  AND t.episode_nr >= 50
+  AND t.episode_nr < 100
+  AND an.person_id = n.id
+  AND n.id = ci.person_id
+  AND ci.movie_id = t.id
+  AND t.id = mk.movie_id
+  AND mk.keyword_id = k.id
+  AND t.id = mc.movie_id
+  AND mc.company_id = cn.id
+  AND an.person_id = ci.person_id
+  AND ci.movie_id = mc.movie_id
+  AND ci.movie_id = mk.movie_id
+  AND mc.movie_id = mk.movie_id;
+
+
+SELECT MIN(chn.name) AS uncredited_voiced_character,
+       MIN(t.title) AS russian_movie
+FROM char_name AS chn,
+     cast_info AS ci,
+     company_name AS cn,
+     company_type AS ct,
+     movie_companies AS mc,
+     role_type AS rt,
+     title AS t
+WHERE ci.note LIKE '%(voice)%'
+  AND ci.note LIKE '%(uncredited)%'
+  AND cn.country_code = '[ru]'
+  AND rt.role = 'actor'
+  AND t.production_year > 2005
+  AND t.id = mc.movie_id
+  AND t.id = ci.movie_id
+  AND ci.movie_id = mc.movie_id
+  AND chn.id = ci.person_role_id
+  AND rt.id = ci.role_id
+  AND cn.id = mc.company_id
+  AND ct.id = mc.company_type_id;
+
+
+  SELECT MIN(k.keyword) AS movie_keyword,
+       MIN(n.name) AS actor_name,
+       MIN(t.title) AS marvel_movie
+FROM cast_info AS ci,
+     keyword AS k,
+     movie_keyword AS mk,
+     name AS n,
+     title AS t
+WHERE k.keyword = 'marvel-cinematic-universe'
+  AND n.name LIKE '%Downey%Robert%'
+  AND t.production_year > 2010
+  AND k.id = mk.keyword_id
+  AND t.id = mk.movie_id
+  AND t.id = ci.movie_id
+  AND ci.movie_id = mk.movie_id
+  AND n.id = ci.person_id;
