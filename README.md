@@ -5,7 +5,7 @@ Before running Rainbow, please install [PyTorch](https://pytorch.org/get-started
 
 ## Running
 
-To train LOGER with default settings, please use the following command.
+To train Rainbow with default settings, please use the following command.
 
 ```shell
 python train.py
