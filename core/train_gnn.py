@@ -271,6 +271,7 @@ def delete_left_table_cond(sql_condition):
 
 
 def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dict):
+    global predicte_num,join_num  # 声明使用全局变量
     num_edge_features = 15
     sql_instance = Sql(sql_query)
 
@@ -279,6 +280,10 @@ def dgl_node_and_edge_vectorization(sql_query, config_index, plan, attribute_dic
     # 处理edge_list中一个语句存在很多and、or语句的情况
     edge_list = []
     for cmp, num_table in edge_lists:
+        if num_table==1:
+            predicte_num+=1
+        else:
+            join_num+=1
         if 'BETWEEN' in cmp:
             edge_list += [(cmp, num_table)]
         elif 'OR' in cmp or 'AND' in cmp:
@@ -702,6 +707,7 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
     print('start load_sql_graphs_pyg')
     # 读取 CSV 数据
     df = pd.read_csv(csv_path).iloc[start_idx:, :]
+    print("data shape :", df.shape)
     # df = pd.read_csv(csv_path).iloc[start_idx:, :].sample(n=3200, random_state=42)
     # 设置数据库连接
     database.setup(dbname=dbname, user=user, password=password, host=host, port=port, cache=False)
@@ -717,10 +723,10 @@ def load_sql_graphs_pyg(csv_path, dbname, user, password, host, port, start_idx=
                 if attr not in attribute_dict:
                     attribute_dict[attr] = attribute_num
                     attribute_num += 1
-
-    # 保存 attribute_dict 到文件
-    with open('/home/ubuntu/project/mayang/LOGER/core/infer_model/job/attribute_dict.pkl', 'wb') as f:
-        pickle.dump(attribute_dict, f)
+    #
+    # # 保存 attribute_dict 到文件
+    # with open('/home/ubuntu/project/mayang/LOGER/core/infer_model/job/attribute_dict.pkl', 'wb') as f:
+    #     pickle.dump(attribute_dict, f)
     print("saved attribute_dict.pkl")
     query_list = df['query'].values
     quey_config_list = df['index'].values
@@ -760,11 +766,12 @@ def calculate_qerror_list(pred_list, valid_list):
 
     return q_errors
 
-
+predicte_num=0
+join_num=0
 def main():
-    data_loader_file = '/tmp/tpcds1_dataloader.pkl'
+    global predicte_num,join_num
+    data_loader_file = '/tmp/test.pkl'
     data_loader = None
-
     # 检查是否已有保存的DataLoader
     if not os.path.exists(data_loader_file):
         # 读取数据并设置数据库
@@ -773,8 +780,8 @@ def main():
         # job: /home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv
 
         sql_graphs_pyg, label_list, config_vector_size = load_sql_graphs_pyg(
-            csv_path='/home/ubuntu/project/mayang/Classification/process_data/job/job_train_8935.csv',
-            dbname='imdbload',
+            csv_path='/home/ubuntu/project/mayang/Classification/process_data/tpcds/tpcds_train_l.csv',
+            dbname='indexselection_tpcds___10',
             user='postgres',
             password='password',
             host='127.0.0.1',
@@ -798,7 +805,8 @@ def main():
             data_loader = pickle.load(f)
 
         print('DataLoader loaded from disk.')
-
+    print("predicte num :",predicte_num)
+    print("join num :",join_num)
     # 初始化模型
     model = ImprovementPredictionModelGNN(
         data_loader.dataset[0].x.shape[1],
