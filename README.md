@@ -1,4 +1,4 @@
-# Rainbow : Risk aware index benefit estimation for dynamic workloads
+# Rainbow: Risk-aware Index Benefit Estimation Facing Out Of Distribution Workloads
 ## Requirements
 
 Before running Rainbow, please install [PyTorch](https://pytorch.org/get-started/locally/) and [Deep Graph Library (DGL)](https://www.dgl.ai/pages/start.html) following the instructions on the pages, and run the command `pip install -r requirements.txt` to install psycopg2 and cx-Oracle. In addition, we use [psqlparse](https://github.com/alculquicondor/psqlparse) to parse queries. Since we found that installing psqlparse with `pip` may result in errors, we recommend building it directly with setup.py. We provide a compiled version in our repository.
