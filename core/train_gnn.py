@@ -393,6 +393,90 @@ def dgl_to_pyg(dgl_graph, label):
                 y=label_tensor, batch=batch)
 
 
+class SimpleEncoder(nn.Module):
+    """简单的编码器，不进行图消息传递，直接聚合节点特征"""
+    
+    def __init__(self, in_feats, embedding_size):
+        super(SimpleEncoder, self).__init__()
+        self.embedding_size = embedding_size
+        
+        # 简单的线性变换层将输入特征转换为所需的嵌入维度
+        self.transform = nn.Linear(in_feats, embedding_size)
+        self.bn = nn.BatchNorm1d(embedding_size)
+        
+    def forward(self, x, edge_attr, edge_index, batch_index):
+        # 首先对节点特征进行线性变换
+        x = self.transform(x)
+        x = self.bn(x)
+        x = F.relu(x)
+        
+        # 使用全局平均池化和最大池化来聚合所有节点的特征
+        global_mean = gap(x, batch_index)
+        global_max = gmp(x, batch_index)
+        
+        # 连接平均池化和最大池化的结果
+        global_representation = torch.cat([global_mean, global_max], dim=1)
+        
+        return global_representation
+
+@variational_estimator
+class SimpleImprovementPredictionModel(nn.Module):
+    """使用简单编码器的预测模型，不进行图消息传递"""
+    
+    def __init__(self, in_feats, config_vector_size, graph_embedding_size=32, hidden_dim=128, num_layers=3):
+        super(SimpleImprovementPredictionModel, self).__init__()
+        
+        # 简单编码器
+        self.encoder = SimpleEncoder(in_feats, graph_embedding_size)
+        
+        # 定义贝叶斯线性层
+        input_dim = graph_embedding_size * 2 + config_vector_size  # *2 是因为我们连接了平均和最大池化的结果
+        self.blinear1 = BayesianLinear(input_dim, hidden_dim, prior_sigma_1=1)
+        self.batch_norm1 = nn.BatchNorm1d(hidden_dim)
+        
+        # 中间的隐藏层
+        self.layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(BayesianLinear(hidden_dim, hidden_dim, prior_sigma_1=1))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+            
+        # 最后一层，隐藏层到输出维度
+        self.blinear_out = BayesianLinear(hidden_dim, 1, prior_sigma_1=1)
+        
+    def forward(self, x, edge_attr, edge_index, configuration_vector, batch_index):
+        # 通过简单编码器获取图的嵌入表示
+        graph_embedding = self.encoder(x, edge_attr, edge_index, batch_index)
+        
+        # 拼接 graph_embedding 和 configuration_vector
+        configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)
+        combined_features = torch.cat([graph_embedding, configuration_vector], dim=1)
+        
+        # 第一个贝叶斯线性层
+        x_ = self.blinear1(combined_features)
+        x_ = self.batch_norm1(x_)
+        x_ = F.leaky_relu(x_)
+        
+        # 中间贝叶斯线性层
+        for layer, batch_norm in zip(self.layers, self.batch_norms):
+            x_ = layer(x_)
+            x_ = batch_norm(x_)
+            x_ = F.leaky_relu(x_)
+            
+        # 最后一层输出预测值
+        output = self.blinear_out(x_)
+        prediction = F.sigmoid(output)
+        
+        return prediction
+        
+    def predict(self, x, edge_attr, edge_index, configuration_vector, batch_index):
+        """在预测时调用"""
+        self.eval()
+        with torch.no_grad():
+            prediction = self.forward(x, edge_attr, edge_index, configuration_vector, batch_index)
+        return prediction
+
+
 class GraphEncoder(nn.Module):
     """图编码模块，基于 TransformerConv,添加了残差连接。"""
 
@@ -527,6 +611,64 @@ class ImprovementPredictionModelGNN(nn.Module):
         return prediction
 
 
+@variational_estimator
+class SimpleImprovementPredictionModel(nn.Module):
+    """使用简单编码器的预测模型，不进行图消息传递"""
+    
+    def __init__(self, in_feats, config_vector_size, graph_embedding_size=32, hidden_dim=128, num_layers=3):
+        super(SimpleImprovementPredictionModel, self).__init__()
+        
+        # 简单编码器
+        self.encoder = SimpleEncoder(in_feats, graph_embedding_size)
+        
+        # 定义贝叶斯线性层
+        input_dim = graph_embedding_size * 2 + config_vector_size  # *2 是因为我们连接了平均和最大池化的结果
+        self.blinear1 = BayesianLinear(input_dim, hidden_dim, prior_sigma_1=1)
+        self.batch_norm1 = nn.BatchNorm1d(hidden_dim)
+        
+        # 中间的隐藏层
+        self.layers = nn.ModuleList()
+        self.batch_norms = nn.ModuleList()
+        for _ in range(num_layers - 1):
+            self.layers.append(BayesianLinear(hidden_dim, hidden_dim, prior_sigma_1=1))
+            self.batch_norms.append(nn.BatchNorm1d(hidden_dim))
+            
+        # 最后一层，隐藏层到输出维度
+        self.blinear_out = BayesianLinear(hidden_dim, 1, prior_sigma_1=1)
+        
+    def forward(self, x, edge_attr, edge_index, configuration_vector, batch_index):
+        # 通过简单编码器获取图的嵌入表示
+        graph_embedding = self.encoder(x, edge_attr, edge_index, batch_index)
+        
+        # 拼接 graph_embedding 和 configuration_vector
+        configuration_vector = configuration_vector.view(graph_embedding.size(0), -1)
+        combined_features = torch.cat([graph_embedding, configuration_vector], dim=1)
+        
+        # 第一个贝叶斯线性层
+        x_ = self.blinear1(combined_features)
+        x_ = self.batch_norm1(x_)
+        x_ = F.leaky_relu(x_)
+        
+        # 中间贝叶斯线性层
+        for layer, batch_norm in zip(self.layers, self.batch_norms):
+            x_ = layer(x_)
+            x_ = batch_norm(x_)
+            x_ = F.leaky_relu(x_)
+            
+        # 最后一层输出预测值
+        output = self.blinear_out(x_)
+        prediction = F.sigmoid(output)
+        
+        return prediction
+        
+    def predict(self, x, edge_attr, edge_index, configuration_vector, batch_index):
+        """在预测时调用"""
+        self.eval()
+        with torch.no_grad():
+            prediction = self.forward(x, edge_attr, edge_index, configuration_vector, batch_index)
+        return prediction
+
+
 def evaluate_regression(regressor,
                         X,
                         y,
@@ -654,13 +796,21 @@ def main():
 
         print('DataLoader loaded from disk.')
 
-    # 初始化模型
+    
+    
     model = ImprovementPredictionModelGNN(
         data_loader.dataset[0].x.shape[1],
         data_loader.dataset[0].edge_attr.shape[1],
         graph_embedding_size=32,
         config_vector_size=data_loader.dataset[0].configuration_vector.shape[0]
     )
+
+    # 初始化模型
+    # model = SimpleImprovementPredictionModel(
+    #     in_feats=data_loader.dataset[0].x.shape[1],
+    #     config_vector_size=data_loader.dataset[0].configuration_vector.shape[0],
+    #     graph_embedding_size=32
+    # )
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     criterion = torch.nn.MSELoss()  # 均方误差损失函数
@@ -696,7 +846,7 @@ def main():
                                                                             samples=25,
                                                                             std_multiplier=3)
 
-                print("CI acc: {:.2f}, CI upper acc: {:.2f}, CI lower acc: {:.2f}".format(ic_acc, under_ci_upper,
+                print("CI µacc: {:.2f}, CI upper acc: {:.2f}, CI lower acc: {:.2f}".format(ic_acc, under_ci_upper,
                                                                                           over_ci_lower))
                 print("Loss: {:.4f}".format(loss))
 
